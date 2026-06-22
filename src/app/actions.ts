@@ -2,6 +2,8 @@ import { desc, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 
 import { db, schema } from "@/db/client";
 import { agents } from "@/agents/registry";
@@ -18,6 +20,59 @@ import type { EditSet } from "@/schemas/edit";
 import type { CriticReview } from "@/schemas/review";
 import type { FinalManuscript } from "@/schemas/final-manuscript";
 import type { MemoryPatch } from "@/schemas/memory-patch";
+
+
+const allowedMemoryTargets = [
+  "memory/canon/world.md",
+  "memory/canon/timeline.md",
+  "memory/progress/state.md",
+  "memory/progress/open_threads.md",
+  "memory/style/voice.md",
+  "memory/style/taboo.md",
+];
+
+function resolveMemoryTarget(rootPath: string, target: string) {
+  const normalized = target.replace(/\\/g, "/").replace(/^\/+/, "");
+  const isCharacterCard = normalized.startsWith("memory/canon/characters/") && normalized.endsWith(".md") && !normalized.includes("..");
+  const isAllowedFile = allowedMemoryTargets.includes(normalized);
+
+  if (!isAllowedFile && !isCharacterCard) {
+    throw new Error(`Memory patch target is not allowed: ${target}`);
+  }
+
+  const resolved = path.resolve(rootPath, normalized);
+  const memoryRoot = path.resolve(rootPath, "memory");
+  if (!resolved.startsWith(memoryRoot + path.sep)) {
+    throw new Error(`Memory patch target escapes project memory: ${target}`);
+  }
+
+  return { normalized, resolved };
+}
+
+async function applyMemoryPatchChange(rootPath: string, change: MemoryPatch["changes"][number]) {
+  const { normalized, resolved } = resolveMemoryTarget(rootPath, change.target);
+  await fs.mkdir(path.dirname(resolved), { recursive: true });
+
+  const header = `
+
+<!-- Writeflow memory patch: ${change.operation} -->
+`;
+  const body = `${header}${change.content.trim()}
+`;
+
+  if (change.operation === "append" || change.operation === "open_thread" || change.operation === "close_thread") {
+    await fs.appendFile(resolved, body, "utf8");
+    return `Appended patch content to ${normalized}`;
+  }
+
+  if (change.operation === "update") {
+    await fs.writeFile(resolved, `${change.content.trim()}
+`, "utf8");
+    return `Replaced ${normalized}`;
+  }
+
+  throw new Error(`Unsupported memory patch operation: ${change.operation}`);
+}
 
 export async function listProjects() {
   return db.select().from(schema.projects).orderBy(desc(schema.projects.updatedAt));
@@ -493,4 +548,53 @@ Generate a conservative memory patch proposal. Do not apply changes.`;
 
   await db.update(schema.projects).set({ updatedAt: now }).where(eq(schema.projects.id, project.id));
   revalidatePath(`/projects/${project.id}`);
+}
+
+export async function applyMemoryPatchForProject(formData: FormData) {
+  "use server";
+
+  const projectId = String(formData.get("projectId") ?? "");
+  const memoryPatchArtifactId = String(formData.get("memoryPatchArtifactId") ?? "");
+  const project = await getProject(projectId);
+
+  if (!project) {
+    throw new Error("Project not found.");
+  }
+
+  const [patchArtifact] = await db.select().from(schema.artifacts).where(eq(schema.artifacts.id, memoryPatchArtifactId));
+  if (!patchArtifact || patchArtifact.projectId !== project.id || patchArtifact.kind !== "memory_patch") {
+    throw new Error("Memory patch artifact not found.");
+  }
+
+  const patch = await readJsonArtifact<MemoryPatch>(project.rootPath, patchArtifact.filePath);
+  if (!patch) {
+    throw new Error("Unable to read memory patch artifact.");
+  }
+
+  const applied = [];
+  for (const change of patch.changes) {
+    applied.push(await applyMemoryPatchChange(project.rootPath, change));
+  }
+
+  const appliedRecord = {
+    sourcePatchArtifactId: patchArtifact.id,
+    appliedAt: new Date().toISOString(),
+    summary: patch.summary,
+    applied,
+  };
+  const now = new Date();
+  const filePath = await writeArtifact(project.rootPath, "memory-patches/applied", "applied-memory-patch", JSON.stringify(appliedRecord, null, 2));
+
+  await db.insert(schema.artifacts).values({
+    id: randomUUID(),
+    projectId: project.id,
+    kind: "memory_patch",
+    title: `Applied memory patch: ${patch.summary.slice(0, 80)}`,
+    filePath,
+    createdAt: now,
+  });
+
+  await db.update(schema.projects).set({ updatedAt: now }).where(eq(schema.projects.id, project.id));
+  revalidatePath(`/projects/${project.id}`);
+  revalidatePath(`/projects/${project.id}/memory`);
 }
