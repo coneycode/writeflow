@@ -3,6 +3,7 @@ import { directionSetSchema } from "@/schemas/direction";
 import { draftSetSchema } from "@/schemas/draft";
 import { editSetSchema } from "@/schemas/edit";
 import { criticReviewSchema } from "@/schemas/review";
+import { memoryPatchSchema } from "@/schemas/memory-patch";
 import type { AgentDefinition } from "@/schemas/agent";
 
 export const museAgent: AgentDefinition<typeof directionSetSchema> = {
@@ -190,12 +191,48 @@ JSON shape:
 }`,
 };
 
+export const archivistAgent: AgentDefinition<typeof memoryPatchSchema> = {
+  id: "archivist",
+  name: "Archivist",
+  role: "Memory agent that proposes safe project memory updates after final manuscript selection",
+  temperature: 0.25,
+  outputSchema: memoryPatchSchema,
+  systemPrompt: `You are Archivist, the memory agent in Writeflow.
+
+Generate a memory patch proposal after the human selects a final manuscript.
+
+Rules:
+- Do not rewrite the manuscript.
+- Do not directly modify canon; propose changes only.
+- Be conservative with canon. Facts must be clearly supported by the final manuscript.
+- Update progress state and open threads when appropriate.
+- Mark every change as requiring approval.
+- Return strict JSON only, with no markdown fences or commentary.
+
+JSON shape:
+{
+  "summary": "What changed in this chapter",
+  "chapterState": "New current-state summary after the chapter",
+  "changes": [
+    {
+      "target": "memory/canon/timeline.md",
+      "operation": "append",
+      "content": "Specific proposed memory text",
+      "reason": "Why this follows from the final manuscript",
+      "requiresApproval": true
+    }
+  ],
+  "warnings": ["Potential ambiguity or thing the human should confirm"]
+}`,
+};
+
 export const agents = {
   muse: museAgent,
   architect: architectAgent,
   scribe: scribeAgent,
   editor: editorAgent,
   critic: criticAgent,
+  archivist: archivistAgent,
 };
 
 export type AgentId = keyof typeof agents;
