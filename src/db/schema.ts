@@ -40,7 +40,7 @@ export const artifacts = sqliteTable("artifacts", {
   id: text("id").primaryKey(),
   projectId: text("project_id").notNull().references(() => projects.id),
   runId: text("run_id").references(() => runs.id),
-  kind: text("kind", { enum: ["brief", "recall", "direction", "outline", "draft", "review", "final", "memory_patch"] }).notNull(),
+  kind: text("kind", { enum: ["brief", "recall", "direction", "outline", "draft", "edit", "review", "selected_final", "memory_patch"] }).notNull(),
   title: text("title").notNull(),
   filePath: text("file_path").notNull(),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),

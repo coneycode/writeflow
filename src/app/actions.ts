@@ -16,6 +16,8 @@ import type { DirectionSet } from "@/schemas/direction";
 import type { DraftSet } from "@/schemas/draft";
 import type { EditSet } from "@/schemas/edit";
 import type { CriticReview } from "@/schemas/review";
+import type { FinalManuscript } from "@/schemas/final-manuscript";
+import type { MemoryPatch } from "@/schemas/memory-patch";
 
 export async function listProjects() {
   return db.select().from(schema.projects).orderBy(desc(schema.projects.updatedAt));
@@ -26,7 +28,7 @@ export async function getProject(projectId: string) {
   return project ?? null;
 }
 
-export async function listProjectArtifacts(projectId: string, kind?: "direction" | "outline" | "draft" | "final" | "review") {
+export async function listProjectArtifacts(projectId: string, kind?: "direction" | "outline" | "draft" | "edit" | "review" | "selected_final" | "memory_patch") {
   const rows = await db.select().from(schema.artifacts).where(eq(schema.artifacts.projectId, projectId)).orderBy(desc(schema.artifacts.createdAt));
   return kind ? rows.filter((artifact) => artifact.kind === kind) : rows;
 }
@@ -82,7 +84,7 @@ export async function listFinalArtifacts(projectId: string) {
     return [];
   }
 
-  const artifacts = await listProjectArtifacts(projectId, "final");
+  const artifacts = await listProjectArtifacts(projectId, "edit");
   return Promise.all(
     artifacts.map(async (artifact) => ({
       artifact,
@@ -102,6 +104,36 @@ export async function listReviewArtifacts(projectId: string) {
     artifacts.map(async (artifact) => ({
       artifact,
       data: await readJsonArtifact<CriticReview>(project.rootPath, artifact.filePath),
+    })),
+  );
+}
+
+export async function listSelectedFinalArtifacts(projectId: string) {
+  const project = await getProject(projectId);
+  if (!project) {
+    return [];
+  }
+
+  const artifacts = await listProjectArtifacts(projectId, "selected_final");
+  return Promise.all(
+    artifacts.map(async (artifact) => ({
+      artifact,
+      data: await readJsonArtifact<FinalManuscript>(project.rootPath, artifact.filePath),
+    })),
+  );
+}
+
+export async function listMemoryPatchArtifacts(projectId: string) {
+  const project = await getProject(projectId);
+  if (!project) {
+    return [];
+  }
+
+  const artifacts = await listProjectArtifacts(projectId, "memory_patch");
+  return Promise.all(
+    artifacts.map(async (artifact) => ({
+      artifact,
+      data: await readJsonArtifact<MemoryPatch>(project.rootPath, artifact.filePath),
     })),
   );
 }
@@ -306,7 +338,7 @@ Polish these variants for Gate 3 review. Preserve story logic and variant differ
   await db.insert(schema.artifacts).values({
     id: randomUUID(),
     projectId: project.id,
-    kind: "final",
+    kind: "edit",
     title: `Editor polished drafts for ${draftSet.outlineTitle}`,
     filePath,
     createdAt: now,
@@ -329,11 +361,11 @@ export async function runCriticForProject(formData: FormData) {
   }
 
   const [sourceArtifact] = await db.select().from(schema.artifacts).where(eq(schema.artifacts.id, artifactId));
-  if (!sourceArtifact || sourceArtifact.projectId !== project.id || !["draft", "final"].includes(sourceArtifact.kind)) {
+  if (!sourceArtifact || sourceArtifact.projectId !== project.id || !["draft", "edit"].includes(sourceArtifact.kind)) {
     throw new Error("Review source artifact not found.");
   }
 
-  const source = artifactKind === "final"
+  const source = artifactKind === "edit"
     ? await readJsonArtifact<EditSet>(project.rootPath, sourceArtifact.filePath)
     : await readJsonArtifact<DraftSet>(project.rootPath, sourceArtifact.filePath);
   if (!source) {
@@ -361,6 +393,100 @@ Critically review these variants for Gate 3 selection.`;
     projectId: project.id,
     kind: "review",
     title: `Critic review for ${sourceArtifact.title}`,
+    filePath,
+    createdAt: now,
+  });
+
+  await db.update(schema.projects).set({ updatedAt: now }).where(eq(schema.projects.id, project.id));
+  revalidatePath(`/projects/${project.id}`);
+}
+
+export async function selectFinalVariantForProject(formData: FormData) {
+  "use server";
+
+  const projectId = String(formData.get("projectId") ?? "");
+  const editArtifactId = String(formData.get("editArtifactId") ?? "");
+  const variantId = String(formData.get("variantId") ?? "");
+  const project = await getProject(projectId);
+
+  if (!project) {
+    throw new Error("Project not found.");
+  }
+
+  const [editArtifact] = await db.select().from(schema.artifacts).where(eq(schema.artifacts.id, editArtifactId));
+  if (!editArtifact || editArtifact.projectId !== project.id || editArtifact.kind !== "edit") {
+    throw new Error("Edited draft artifact not found.");
+  }
+
+  const editSet = await readJsonArtifact<EditSet>(project.rootPath, editArtifact.filePath);
+  const variant = editSet?.variants.find((item) => item.id === variantId);
+  if (!editSet || !variant) {
+    throw new Error("Selected edited variant not found.");
+  }
+
+  const finalManuscript: FinalManuscript = {
+    sourceArtifactId: editArtifact.id,
+    sourceVariantId: variant.id,
+    title: variant.title,
+    manuscript: variant.manuscript,
+    selectionNote: `Selected from ${editSet.sourceDraftTitle}`,
+  };
+  const now = new Date();
+  const filePath = await writeArtifact(project.rootPath, "selected-finals", `final-${variant.id}`, JSON.stringify(finalManuscript, null, 2));
+
+  await db.insert(schema.artifacts).values({
+    id: randomUUID(),
+    projectId: project.id,
+    kind: "selected_final",
+    title: `Selected final: ${variant.title}`,
+    filePath,
+    createdAt: now,
+  });
+
+  await db.update(schema.projects).set({ updatedAt: now }).where(eq(schema.projects.id, project.id));
+  revalidatePath(`/projects/${project.id}`);
+}
+
+export async function runArchivistForProject(formData: FormData) {
+  "use server";
+
+  const projectId = String(formData.get("projectId") ?? "");
+  const finalArtifactId = String(formData.get("finalArtifactId") ?? "");
+  const project = await getProject(projectId);
+
+  if (!project) {
+    throw new Error("Project not found.");
+  }
+
+  const [finalArtifact] = await db.select().from(schema.artifacts).where(eq(schema.artifacts.id, finalArtifactId));
+  if (!finalArtifact || finalArtifact.projectId !== project.id || finalArtifact.kind !== "selected_final") {
+    throw new Error("Selected final artifact not found.");
+  }
+
+  const finalManuscript = await readJsonArtifact<FinalManuscript>(project.rootPath, finalArtifact.filePath);
+  if (!finalManuscript) {
+    throw new Error("Unable to read selected final artifact.");
+  }
+
+  const recall = await buildNovelRecallContext(project.rootPath);
+  const prompt = `Project: ${project.name}
+
+Selected final manuscript:
+${JSON.stringify(finalManuscript, null, 2)}
+
+Current project memory:
+${recall}
+
+Generate a conservative memory patch proposal. Do not apply changes.`;
+  const result = await runAgent({ agent: agents.archivist, prompt, maxTokens: 3200 });
+  const now = new Date();
+  const filePath = await writeArtifact(project.rootPath, "memory-patches", "archivist-memory-patch", JSON.stringify(result, null, 2));
+
+  await db.insert(schema.artifacts).values({
+    id: randomUUID(),
+    projectId: project.id,
+    kind: "memory_patch",
+    title: `Memory patch for ${finalManuscript.title}`,
     filePath,
     createdAt: now,
   });
