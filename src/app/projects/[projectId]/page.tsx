@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
-import { getProject, listDirectionArtifacts, listDraftArtifacts, listOutlineArtifacts, runArchitectForProject, runMuseForProject, runScribeForProject } from "@/app/actions";
+import { getProject, listDirectionArtifacts, listDraftArtifacts, listFinalArtifacts, listOutlineArtifacts, listReviewArtifacts, runArchitectForProject, runCriticForProject, runEditorForProject, runMuseForProject, runScribeForProject } from "@/app/actions";
 
 const memoryItems = ["State", "Characters", "World", "Timeline", "Open threads", "Voice", "Taboos"];
 const agentItems = ["Archivist", "Muse", "Architect", "Scribe", "Editor", "Critic"];
@@ -17,6 +17,8 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
   const directionArtifacts = await listDirectionArtifacts(project.id);
   const outlineArtifacts = await listOutlineArtifacts(project.id);
   const draftArtifacts = await listDraftArtifacts(project.id);
+  const finalArtifacts = await listFinalArtifacts(project.id);
+  const reviewArtifacts = await listReviewArtifacts(project.id);
 
   return (
     <main className="min-h-screen bg-stone-950 text-stone-100">
@@ -201,6 +203,23 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
                         {data ? (
                           <div className="mt-3">
                             <p className="text-sm text-amber-300">{data.outlineTitle}</p>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              <form action={runEditorForProject}>
+                                <input type="hidden" name="projectId" value={project.id} />
+                                <input type="hidden" name="draftArtifactId" value={artifact.id} />
+                                <button className="rounded-xl border border-amber-300/60 px-3 py-2 text-xs font-medium text-amber-200 transition hover:bg-amber-300 hover:text-stone-950">
+                                  Run Editor polish
+                                </button>
+                              </form>
+                              <form action={runCriticForProject}>
+                                <input type="hidden" name="projectId" value={project.id} />
+                                <input type="hidden" name="artifactId" value={artifact.id} />
+                                <input type="hidden" name="artifactKind" value="draft" />
+                                <button className="rounded-xl border border-red-300/60 px-3 py-2 text-xs font-medium text-red-200 transition hover:bg-red-300 hover:text-stone-950">
+                                  Run Critic review
+                                </button>
+                              </form>
+                            </div>
                             <div className="mt-3 grid gap-3">
                               {data.variants.map((variant) => (
                                 <details key={variant.id} className="rounded-xl bg-stone-950 p-3">
@@ -217,6 +236,92 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
                           </div>
                         ) : (
                           <p className="mt-3 text-sm text-stone-500">Unable to read draft artifact.</p>
+                        )}
+                      </article>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-stone-800 bg-stone-950/50 p-6">
+                <div className="flex items-center justify-between gap-4">
+                  <h3 className="text-lg font-semibold">Latest Editor polished drafts</h3>
+                  <span className="text-sm text-stone-500">{finalArtifacts.length} saved</span>
+                </div>
+                <div className="mt-4 space-y-4">
+                  {finalArtifacts.length === 0 ? (
+                    <p className="rounded-2xl border border-dashed border-stone-700 p-6 text-sm text-stone-500">
+                      No polished drafts yet. Run Editor on a Scribe draft to prepare Gate 3 selection.
+                    </p>
+                  ) : (
+                    finalArtifacts.slice(0, 3).map(({ artifact, data }) => (
+                      <article key={artifact.id} className="rounded-2xl border border-stone-800 bg-stone-900/70 p-4">
+                        <p className="text-xs font-mono text-stone-500">{artifact.filePath}</p>
+                        {data ? (
+                          <div className="mt-3">
+                            <p className="text-sm text-amber-300">{data.sourceDraftTitle}</p>
+                            <form action={runCriticForProject} className="mt-3">
+                              <input type="hidden" name="projectId" value={project.id} />
+                              <input type="hidden" name="artifactId" value={artifact.id} />
+                              <input type="hidden" name="artifactKind" value="final" />
+                              <button className="rounded-xl border border-red-300/60 px-3 py-2 text-xs font-medium text-red-200 transition hover:bg-red-300 hover:text-stone-950">
+                                Run Critic on polished drafts
+                              </button>
+                            </form>
+                            <div className="mt-3 grid gap-3">
+                              {data.variants.map((variant) => (
+                                <details key={variant.id} className="rounded-xl bg-stone-950 p-3">
+                                  <summary className="cursor-pointer text-sm font-medium text-stone-200">
+                                    {variant.id}: {variant.title}
+                                  </summary>
+                                  <p className="mt-2 text-xs text-stone-500">Edit strategy: {variant.editStrategy}</p>
+                                  <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap rounded-xl border border-stone-800 bg-stone-900 p-3 text-sm leading-6 text-stone-300">
+                                    {variant.manuscript}
+                                  </pre>
+                                </details>
+                              ))}
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="mt-3 text-sm text-stone-500">Unable to read polished draft artifact.</p>
+                        )}
+                      </article>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-stone-800 bg-stone-950/50 p-6">
+                <div className="flex items-center justify-between gap-4">
+                  <h3 className="text-lg font-semibold">Latest Critic reviews</h3>
+                  <span className="text-sm text-stone-500">{reviewArtifacts.length} saved</span>
+                </div>
+                <div className="mt-4 space-y-4">
+                  {reviewArtifacts.length === 0 ? (
+                    <p className="rounded-2xl border border-dashed border-stone-700 p-6 text-sm text-stone-500">
+                      No reviews yet. Run Critic on drafts or polished drafts before Gate 3 final selection.
+                    </p>
+                  ) : (
+                    reviewArtifacts.slice(0, 3).map(({ artifact, data }) => (
+                      <article key={artifact.id} className="rounded-2xl border border-stone-800 bg-stone-900/70 p-4">
+                        <p className="text-xs font-mono text-stone-500">{artifact.filePath}</p>
+                        {data ? (
+                          <div className="mt-3">
+                            <p className="text-sm text-amber-300">Verdict: {data.verdict}</p>
+                            <p className="mt-2 text-sm text-stone-300">{data.summary}</p>
+                            <p className="mt-2 text-xs text-stone-500">Recommendation: {data.finalGateRecommendation}</p>
+                            <div className="mt-3 space-y-2">
+                              {data.issues.map((issue, index) => (
+                                <div key={`${issue.severity}-${index}`} className="rounded-xl bg-stone-950 p-3">
+                                  <p className="text-sm font-medium text-red-200">{issue.severity.toUpperCase()}: {issue.problem}</p>
+                                  <p className="mt-1 text-xs text-stone-500">Evidence: {issue.evidence}</p>
+                                  <p className="mt-1 text-xs text-stone-500">Fix: {issue.suggestedFix}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="mt-3 text-sm text-stone-500">Unable to read review artifact.</p>
                         )}
                       </article>
                     ))

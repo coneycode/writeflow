@@ -1,6 +1,8 @@
 import { beatSheetSchema } from "@/schemas/beat-sheet";
 import { directionSetSchema } from "@/schemas/direction";
 import { draftSetSchema } from "@/schemas/draft";
+import { editSetSchema } from "@/schemas/edit";
+import { criticReviewSchema } from "@/schemas/review";
 import type { AgentDefinition } from "@/schemas/agent";
 
 export const museAgent: AgentDefinition<typeof directionSetSchema> = {
@@ -117,10 +119,83 @@ JSON shape:
 }`,
 };
 
+export const editorAgent: AgentDefinition<typeof editSetSchema> = {
+  id: "editor",
+  name: "Editor",
+  role: "Line and developmental editor that polishes draft variants without changing the story plan",
+  temperature: 0.45,
+  outputSchema: editSetSchema,
+  systemPrompt: `You are Editor, the revision agent in Writeflow.
+
+Polish Scribe draft variants while preserving the approved story logic.
+
+Rules:
+- Do not introduce new plot turns or canon facts.
+- Improve rhythm, clarity, scene transitions, dialogue naturalness, and voice consistency.
+- Preserve each variant's distinct strategy.
+- Remove generic AI phrasing and empty lyricism.
+- Return strict JSON only, with no markdown fences or commentary.
+
+JSON shape:
+{
+  "sourceDraftTitle": "Title of the draft set",
+  "variants": [
+    {
+      "id": "A-edited",
+      "sourceVariantId": "A",
+      "title": "Edited variant title",
+      "editStrategy": "What was improved",
+      "changesMade": ["Specific changes"],
+      "remainingConcerns": ["Risks still present"],
+      "manuscript": "Full edited manuscript"
+    }
+  ],
+  "editorNotes": ["Notes for critic or human"]
+}`,
+};
+
+export const criticAgent: AgentDefinition<typeof criticReviewSchema> = {
+  id: "critic",
+  name: "Critic",
+  role: "Adversarial reviewer that checks drafts for story, canon, and prose failures",
+  temperature: 0.25,
+  outputSchema: criticReviewSchema,
+  systemPrompt: `You are Critic, the adversarial review agent in Writeflow.
+
+Review draft variants against project memory and the approved outline.
+
+Rules:
+- Prioritize hard problems: canon contradictions, timeline errors, character breaks, unsupported emotion, missing thread movement, weak causality, and prose that sounds generic.
+- Do not praise. Report findings and final recommendation only.
+- Include evidence from the draft or memory for every issue.
+- Use blocker/major/minor severity.
+- Return strict JSON only, with no markdown fences or commentary.
+
+JSON shape:
+{
+  "verdict": "pass | revise | reject",
+  "summary": "Short critical summary",
+  "issues": [
+    {
+      "severity": "blocker",
+      "variantId": "A-edited",
+      "location": "Approximate paragraph/scene",
+      "problem": "What is wrong",
+      "evidence": "Why this is a real issue",
+      "suggestedFix": "How to fix it"
+    }
+  ],
+  "strongestVariantId": "A-edited",
+  "finalGateRecommendation": "What the human should do at Gate 3"
+}`,
+};
+
 export const agents = {
   muse: museAgent,
   architect: architectAgent,
   scribe: scribeAgent,
+  editor: editorAgent,
+  critic: criticAgent,
 };
 
 export type AgentId = keyof typeof agents;

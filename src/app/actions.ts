@@ -14,6 +14,8 @@ import { createProjectSchema } from "@/schemas/project";
 import type { BeatSheet } from "@/schemas/beat-sheet";
 import type { DirectionSet } from "@/schemas/direction";
 import type { DraftSet } from "@/schemas/draft";
+import type { EditSet } from "@/schemas/edit";
+import type { CriticReview } from "@/schemas/review";
 
 export async function listProjects() {
   return db.select().from(schema.projects).orderBy(desc(schema.projects.updatedAt));
@@ -24,7 +26,7 @@ export async function getProject(projectId: string) {
   return project ?? null;
 }
 
-export async function listProjectArtifacts(projectId: string, kind?: "direction" | "outline" | "draft") {
+export async function listProjectArtifacts(projectId: string, kind?: "direction" | "outline" | "draft" | "final" | "review") {
   const rows = await db.select().from(schema.artifacts).where(eq(schema.artifacts.projectId, projectId)).orderBy(desc(schema.artifacts.createdAt));
   return kind ? rows.filter((artifact) => artifact.kind === kind) : rows;
 }
@@ -70,6 +72,36 @@ export async function listDraftArtifacts(projectId: string) {
     artifacts.map(async (artifact) => ({
       artifact,
       data: await readJsonArtifact<DraftSet>(project.rootPath, artifact.filePath),
+    })),
+  );
+}
+
+export async function listFinalArtifacts(projectId: string) {
+  const project = await getProject(projectId);
+  if (!project) {
+    return [];
+  }
+
+  const artifacts = await listProjectArtifacts(projectId, "final");
+  return Promise.all(
+    artifacts.map(async (artifact) => ({
+      artifact,
+      data: await readJsonArtifact<EditSet>(project.rootPath, artifact.filePath),
+    })),
+  );
+}
+
+export async function listReviewArtifacts(projectId: string) {
+  const project = await getProject(projectId);
+  if (!project) {
+    return [];
+  }
+
+  const artifacts = await listProjectArtifacts(projectId, "review");
+  return Promise.all(
+    artifacts.map(async (artifact) => ({
+      artifact,
+      data: await readJsonArtifact<CriticReview>(project.rootPath, artifact.filePath),
     })),
   );
 }
@@ -234,4 +266,105 @@ export async function runArchitectForProject(formData: FormData) {
 
   revalidatePath(`/projects/${project.id}`);
   revalidatePath(`/projects/${project.id}/runs`);
+}
+
+export async function runEditorForProject(formData: FormData) {
+  "use server";
+
+  const projectId = String(formData.get("projectId") ?? "");
+  const draftArtifactId = String(formData.get("draftArtifactId") ?? "");
+  const project = await getProject(projectId);
+
+  if (!project) {
+    throw new Error("Project not found.");
+  }
+
+  const [draftArtifact] = await db.select().from(schema.artifacts).where(eq(schema.artifacts.id, draftArtifactId));
+  if (!draftArtifact || draftArtifact.projectId !== project.id || draftArtifact.kind !== "draft") {
+    throw new Error("Draft artifact not found.");
+  }
+
+  const draftSet = await readJsonArtifact<DraftSet>(project.rootPath, draftArtifact.filePath);
+  if (!draftSet) {
+    throw new Error("Unable to read draft artifact.");
+  }
+
+  const recall = await buildNovelRecallContext(project.rootPath);
+  const prompt = `Project: ${project.name}
+
+Draft variants:
+${JSON.stringify(draftSet, null, 2)}
+
+Project memory:
+${recall}
+
+Polish these variants for Gate 3 review. Preserve story logic and variant differences.`;
+  const result = await runAgent({ agent: agents.editor, prompt, maxTokens: 6200 });
+  const now = new Date();
+  const filePath = await writeArtifact(project.rootPath, "finals", "editor-polished-drafts", JSON.stringify(result, null, 2));
+
+  await db.insert(schema.artifacts).values({
+    id: randomUUID(),
+    projectId: project.id,
+    kind: "final",
+    title: `Editor polished drafts for ${draftSet.outlineTitle}`,
+    filePath,
+    createdAt: now,
+  });
+
+  await db.update(schema.projects).set({ updatedAt: now }).where(eq(schema.projects.id, project.id));
+  revalidatePath(`/projects/${project.id}`);
+}
+
+export async function runCriticForProject(formData: FormData) {
+  "use server";
+
+  const projectId = String(formData.get("projectId") ?? "");
+  const artifactId = String(formData.get("artifactId") ?? "");
+  const artifactKind = String(formData.get("artifactKind") ?? "draft");
+  const project = await getProject(projectId);
+
+  if (!project) {
+    throw new Error("Project not found.");
+  }
+
+  const [sourceArtifact] = await db.select().from(schema.artifacts).where(eq(schema.artifacts.id, artifactId));
+  if (!sourceArtifact || sourceArtifact.projectId !== project.id || !["draft", "final"].includes(sourceArtifact.kind)) {
+    throw new Error("Review source artifact not found.");
+  }
+
+  const source = artifactKind === "final"
+    ? await readJsonArtifact<EditSet>(project.rootPath, sourceArtifact.filePath)
+    : await readJsonArtifact<DraftSet>(project.rootPath, sourceArtifact.filePath);
+  if (!source) {
+    throw new Error("Unable to read review source artifact.");
+  }
+
+  const recall = await buildNovelRecallContext(project.rootPath);
+  const prompt = `Project: ${project.name}
+
+Review source artifact kind: ${artifactKind}
+
+Drafts to review:
+${JSON.stringify(source, null, 2)}
+
+Project memory:
+${recall}
+
+Critically review these variants for Gate 3 selection.`;
+  const result = await runAgent({ agent: agents.critic, prompt, maxTokens: 3600 });
+  const now = new Date();
+  const filePath = await writeArtifact(project.rootPath, "reviews", "critic-review", JSON.stringify(result, null, 2));
+
+  await db.insert(schema.artifacts).values({
+    id: randomUUID(),
+    projectId: project.id,
+    kind: "review",
+    title: `Critic review for ${sourceArtifact.title}`,
+    filePath,
+    createdAt: now,
+  });
+
+  await db.update(schema.projects).set({ updatedAt: now }).where(eq(schema.projects.id, project.id));
+  revalidatePath(`/projects/${project.id}`);
 }
