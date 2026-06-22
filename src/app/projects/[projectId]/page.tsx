@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
-import { getProject, listDirectionArtifacts, listDraftArtifacts, listFinalArtifacts, listMemoryPatchArtifacts, listOutlineArtifacts, listReviewArtifacts, listSelectedFinalArtifacts, runArchitectForProject, runArchivistForProject, runCriticForProject, runEditorForProject, runMuseForProject, runScribeForProject, selectFinalVariantForProject } from "@/app/actions";
+import { getProject, listDirectionArtifacts, listDraftArtifacts, listFinalArtifacts, listMemoryPatchArtifacts, listOutlineArtifacts, listReviewArtifacts, listSelectedFinalArtifacts, applyMemoryPatchForProject, runArchitectForProject, runArchivistForProject, runCriticForProject, runEditorForProject, runMuseForProject, runScribeForProject, selectFinalVariantForProject } from "@/app/actions";
 
 const memoryItems = ["State", "Characters", "World", "Timeline", "Open threads", "Voice", "Taboos"];
 const agentItems = ["Archivist", "Muse", "Architect", "Scribe", "Editor", "Critic"];
@@ -357,6 +357,16 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
                           <div className="mt-3">
                             <p className="text-sm text-amber-300">{data.summary}</p>
                             <p className="mt-2 text-xs text-stone-500">New state: {data.chapterState}</p>
+                            <form action={applyMemoryPatchForProject} className="mt-3">
+                              <input type="hidden" name="projectId" value={project.id} />
+                              <input type="hidden" name="memoryPatchArtifactId" value={artifact.id} />
+                              <button className="rounded-xl border border-green-300/60 px-3 py-2 text-xs font-medium text-green-200 transition hover:bg-green-300 hover:text-stone-950">
+                                Apply approved memory patch
+                              </button>
+                            </form>
+                            <p className="mt-2 text-xs text-stone-500">
+                              Applying appends thread changes and replaces update targets. Review each proposed change before approving.
+                            </p>
                             <div className="mt-3 space-y-2">
                               {data.changes.map((change, index) => (
                                 <div key={`${change.target}-${index}`} className="rounded-xl bg-stone-950 p-3">
