@@ -1,4 +1,6 @@
 import Link from "next/link";
+
+import { SubmitButton } from "@/components/forms/submit-button";
 import { notFound } from "next/navigation";
 
 import { getProject, listDirectionArtifacts, listDraftArtifacts, listFinalArtifacts, listMemoryPatchArtifacts, listOutlineArtifacts, listReviewArtifacts, listSelectedFinalArtifacts, applyMemoryPatchForProject, runArchitectForProject, runArchivistForProject, runCriticForProject, runEditorForProject, runMuseForProject, runScribeForProject, selectFinalVariantForProject } from "@/app/actions";
@@ -83,9 +85,9 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
                       Generate structured continuation directions from the local memory files. Requires OpenAI-compatible settings in `.env.local`.
                     </p>
                   </div>
-                  <button className="rounded-2xl bg-amber-300 px-4 py-2 text-sm font-medium text-stone-950 transition hover:bg-amber-200">
+                  <SubmitButton pendingText="Running Muse..." className="rounded-2xl bg-amber-300 px-4 py-2 text-sm font-medium text-stone-950 transition hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-60">
                     Generate directions
-                  </button>
+                  </SubmitButton>
                 </div>
                 <textarea
                   name="brief"
@@ -131,9 +133,9 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
                               <p className="text-sm text-amber-300">Option {option.id}: {option.title}</p>
                               <p className="mt-2 text-sm text-stone-300">{option.coreMove}</p>
                               <p className="mt-2 text-xs text-stone-500">Next beat: {option.nextBeat}</p>
-                              <button className="mt-3 rounded-xl border border-amber-300/60 px-3 py-2 text-xs font-medium text-amber-200 transition hover:bg-amber-300 hover:text-stone-950">
+                              <SubmitButton pendingText="Outlining..." className="mt-3 rounded-xl border border-amber-300/60 px-3 py-2 text-xs font-medium text-amber-200 transition hover:bg-amber-300 hover:text-stone-950 disabled:cursor-not-allowed disabled:opacity-60">
                                 Choose for Gate 1 and outline
-                              </button>
+                              </SubmitButton>
                             </form>
                           )) ?? <p className="text-sm text-stone-500">Unable to read artifact.</p>}
                         </div>
@@ -165,9 +167,9 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
                             <form action={runScribeForProject} className="mt-3">
                               <input type="hidden" name="projectId" value={project.id} />
                               <input type="hidden" name="outlineArtifactId" value={artifact.id} />
-                              <button className="rounded-xl border border-amber-300/60 px-3 py-2 text-xs font-medium text-amber-200 transition hover:bg-amber-300 hover:text-stone-950">
+                              <SubmitButton pendingText="Drafting..." className="rounded-xl border border-amber-300/60 px-3 py-2 text-xs font-medium text-amber-200 transition hover:bg-amber-300 hover:text-stone-950 disabled:cursor-not-allowed disabled:opacity-60">
                                 Approve Gate 2 and draft variants
-                              </button>
+                              </SubmitButton>
                             </form>
                             <div className="mt-3 space-y-2">
                               {data.scenes.map((scene) => (
@@ -209,17 +211,17 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
                               <form action={runEditorForProject}>
                                 <input type="hidden" name="projectId" value={project.id} />
                                 <input type="hidden" name="draftArtifactId" value={artifact.id} />
-                                <button className="rounded-xl border border-amber-300/60 px-3 py-2 text-xs font-medium text-amber-200 transition hover:bg-amber-300 hover:text-stone-950">
+                                <SubmitButton pendingText="Polishing..." className="rounded-xl border border-amber-300/60 px-3 py-2 text-xs font-medium text-amber-200 transition hover:bg-amber-300 hover:text-stone-950 disabled:cursor-not-allowed disabled:opacity-60">
                                   Run Editor polish
-                                </button>
+                                </SubmitButton>
                               </form>
                               <form action={runCriticForProject}>
                                 <input type="hidden" name="projectId" value={project.id} />
                                 <input type="hidden" name="artifactId" value={artifact.id} />
                                 <input type="hidden" name="artifactKind" value="draft" />
-                                <button className="rounded-xl border border-red-300/60 px-3 py-2 text-xs font-medium text-red-200 transition hover:bg-red-300 hover:text-stone-950">
+                                <SubmitButton pendingText="Reviewing..." className="rounded-xl border border-red-300/60 px-3 py-2 text-xs font-medium text-red-200 transition hover:bg-red-300 hover:text-stone-950 disabled:cursor-not-allowed disabled:opacity-60">
                                   Run Critic review
-                                </button>
+                                </SubmitButton>
                               </form>
                             </div>
                             <div className="mt-3 grid gap-3">
@@ -266,9 +268,9 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
                               <input type="hidden" name="projectId" value={project.id} />
                               <input type="hidden" name="artifactId" value={artifact.id} />
                               <input type="hidden" name="artifactKind" value="edit" />
-                              <button className="rounded-xl border border-red-300/60 px-3 py-2 text-xs font-medium text-red-200 transition hover:bg-red-300 hover:text-stone-950">
+                              <SubmitButton pendingText="Reviewing..." className="rounded-xl border border-red-300/60 px-3 py-2 text-xs font-medium text-red-200 transition hover:bg-red-300 hover:text-stone-950 disabled:cursor-not-allowed disabled:opacity-60">
                                 Run Critic on polished drafts
-                              </button>
+                              </SubmitButton>
                             </form>
                             <div className="mt-3 grid gap-3">
                               {data.variants.map((variant) => (
@@ -281,9 +283,9 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
                                     <input type="hidden" name="projectId" value={project.id} />
                                     <input type="hidden" name="editArtifactId" value={artifact.id} />
                                     <input type="hidden" name="variantId" value={variant.id} />
-                                    <button className="rounded-xl border border-green-300/60 px-3 py-2 text-xs font-medium text-green-200 transition hover:bg-green-300 hover:text-stone-950">
+                                    <SubmitButton pendingText="Selecting..." className="rounded-xl border border-green-300/60 px-3 py-2 text-xs font-medium text-green-200 transition hover:bg-green-300 hover:text-stone-950 disabled:cursor-not-allowed disabled:opacity-60">
                                       Select as Gate 3 final
-                                    </button>
+                                    </SubmitButton>
                                   </form>
                                   <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap rounded-xl border border-stone-800 bg-stone-900 p-3 text-sm leading-6 text-stone-300">
                                     {variant.manuscript}
@@ -322,9 +324,9 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
                             <form action={runArchivistForProject} className="mt-3">
                               <input type="hidden" name="projectId" value={project.id} />
                               <input type="hidden" name="finalArtifactId" value={artifact.id} />
-                              <button className="rounded-xl border border-amber-300/60 px-3 py-2 text-xs font-medium text-amber-200 transition hover:bg-amber-300 hover:text-stone-950">
+                              <SubmitButton pendingText="Generating patch..." className="rounded-xl border border-amber-300/60 px-3 py-2 text-xs font-medium text-amber-200 transition hover:bg-amber-300 hover:text-stone-950 disabled:cursor-not-allowed disabled:opacity-60">
                                 Generate Archivist memory patch
-                              </button>
+                              </SubmitButton>
                             </form>
                             <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap rounded-xl border border-stone-800 bg-stone-950 p-3 text-sm leading-6 text-stone-300">
                               {data.manuscript}
@@ -360,9 +362,9 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
                             <form action={applyMemoryPatchForProject} className="mt-3">
                               <input type="hidden" name="projectId" value={project.id} />
                               <input type="hidden" name="memoryPatchArtifactId" value={artifact.id} />
-                              <button className="rounded-xl border border-green-300/60 px-3 py-2 text-xs font-medium text-green-200 transition hover:bg-green-300 hover:text-stone-950">
+                              <SubmitButton pendingText="Applying..." className="rounded-xl border border-green-300/60 px-3 py-2 text-xs font-medium text-green-200 transition hover:bg-green-300 hover:text-stone-950 disabled:cursor-not-allowed disabled:opacity-60">
                                 Apply approved memory patch
-                              </button>
+                              </SubmitButton>
                             </form>
                             <p className="mt-2 text-xs text-stone-500">
                               Applying appends thread changes and replaces update targets. Review each proposed change before approving.

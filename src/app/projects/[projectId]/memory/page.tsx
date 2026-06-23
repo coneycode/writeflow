@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import Link from "next/link";
+
+import { SubmitButton } from "@/components/forms/submit-button";
 import { notFound } from "next/navigation";
 
 import { getProject, updateProjectMemoryFile } from "@/app/actions";
@@ -64,9 +66,9 @@ export default async function MemoryPage({ params }: { params: Promise<{ project
                   <p className="mt-1 font-mono text-xs text-stone-500">{file.relativePath}</p>
                   <p className="mt-2 text-xs leading-5 text-stone-500">{file.help}</p>
                 </div>
-                <button className="rounded-full bg-amber-300 px-4 py-2 text-xs font-medium text-stone-950 transition hover:bg-amber-200">
+                <SubmitButton pendingText="Saving..." className="rounded-full bg-amber-300 px-4 py-2 text-xs font-medium text-stone-950 transition hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-60">
                   Save
-                </button>
+                </SubmitButton>
               </div>
               <textarea
                 name="content"
