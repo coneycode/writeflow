@@ -74,9 +74,64 @@ async function applyMemoryPatchChange(rootPath: string, change: MemoryPatch["cha
   throw new Error(`Unsupported memory patch operation: ${change.operation}`);
 }
 
+
+type WorkflowRunInput = {
+  agentId?: string;
+  artifactId?: string;
+  currentStep: string;
+  projectId: string;
+  stepType: "agent" | "gate" | "system";
+  summary: string;
+  title: string;
+  workflow?: string;
+};
+
+async function recordWorkflowRun(input: WorkflowRunInput) {
+  const now = new Date();
+  const runId = randomUUID();
+
+  await db.insert(schema.runs).values({
+    id: runId,
+    projectId: input.projectId,
+    workflow: input.workflow ?? "novel_continue",
+    status: "completed",
+    currentStep: input.currentStep,
+    summary: input.summary,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  await db.insert(schema.runSteps).values({
+    id: randomUUID(),
+    runId,
+    agentId: input.agentId,
+    stepType: input.stepType,
+    title: input.title,
+    status: "completed",
+    artifactId: input.artifactId,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  return runId;
+}
+
 export async function listProjects() {
   return db.select().from(schema.projects).orderBy(desc(schema.projects.updatedAt));
 }
+
+export async function listProjectRuns(projectId: string) {
+  const rows = await db.select().from(schema.runs).where(eq(schema.runs.projectId, projectId)).orderBy(desc(schema.runs.createdAt));
+
+  return Promise.all(
+    rows.map(async (run) => ({
+      run,
+      steps: await db.select().from(schema.runSteps).where(eq(schema.runSteps.runId, run.id)).orderBy(desc(schema.runSteps.createdAt)),
+      artifacts: await db.select().from(schema.artifacts).where(eq(schema.artifacts.runId, run.id)).orderBy(desc(schema.artifacts.createdAt)),
+    })),
+  );
+}
+
 
 export async function getProject(projectId: string) {
   const [project] = await db.select().from(schema.projects).where(eq(schema.projects.id, projectId));
@@ -266,10 +321,21 @@ export async function runMuseForProject(formData: FormData) {
   const result = await runAgent({ agent: agents.muse, prompt, maxTokens: 2200 });
   const now = new Date();
   const filePath = await writeArtifact(project.rootPath, "directions", "muse-directions", JSON.stringify(result, null, 2));
+  const artifactId = randomUUID();
+  const runId = await recordWorkflowRun({
+    agentId: "muse",
+    artifactId,
+    currentStep: "directions",
+    projectId: project.id,
+    stepType: "agent",
+    summary: "Muse generated story direction options.",
+    title: "Generate Muse directions",
+  });
 
   await db.insert(schema.artifacts).values({
-    id: randomUUID(),
+    id: artifactId,
     projectId: project.id,
+    runId,
     kind: "direction",
     title: "Muse direction options",
     filePath,
@@ -312,10 +378,21 @@ export async function runScribeForProject(formData: FormData) {
   const result = await runAgent({ agent: agents.scribe, prompt, maxTokens: 5200 });
   const now = new Date();
   const filePath = await writeArtifact(project.rootPath, "drafts", "scribe-drafts", JSON.stringify(result, null, 2));
+  const artifactId = randomUUID();
+  const runId = await recordWorkflowRun({
+    agentId: "scribe",
+    artifactId,
+    currentStep: "drafting",
+    projectId: project.id,
+    stepType: "agent",
+    summary: `Scribe generated draft variants for ${beatSheet.chapterTitle}.`,
+    title: "Generate Scribe draft variants",
+  });
 
   await db.insert(schema.artifacts).values({
-    id: randomUUID(),
+    id: artifactId,
     projectId: project.id,
+    runId,
     kind: "draft",
     title: `Scribe drafts for ${beatSheet.chapterTitle}`,
     filePath,
@@ -361,10 +438,21 @@ export async function runArchitectForProject(formData: FormData) {
   const result = await runAgent({ agent: agents.architect, prompt, maxTokens: 2600 });
   const now = new Date();
   const filePath = await writeArtifact(project.rootPath, "outlines", `outline-${selectedOption.id}`, JSON.stringify(result, null, 2));
+  const artifactId = randomUUID();
+  const runId = await recordWorkflowRun({
+    agentId: "architect",
+    artifactId,
+    currentStep: "outline",
+    projectId: project.id,
+    stepType: "agent",
+    summary: `Architect generated an outline for option ${selectedOption.id}.`,
+    title: "Generate Architect outline",
+  });
 
   await db.insert(schema.artifacts).values({
-    id: randomUUID(),
+    id: artifactId,
     projectId: project.id,
+    runId,
     kind: "outline",
     title: `Architect outline for option ${selectedOption.id}`,
     filePath,
@@ -411,10 +499,21 @@ Polish these variants for Gate 3 review. Preserve story logic and variant differ
   const result = await runAgent({ agent: agents.editor, prompt, maxTokens: 6200 });
   const now = new Date();
   const filePath = await writeArtifact(project.rootPath, "finals", "editor-polished-drafts", JSON.stringify(result, null, 2));
+  const artifactId = randomUUID();
+  const runId = await recordWorkflowRun({
+    agentId: "editor",
+    artifactId,
+    currentStep: "editing",
+    projectId: project.id,
+    stepType: "agent",
+    summary: `Editor polished drafts for ${draftSet.outlineTitle}.`,
+    title: "Polish draft variants",
+  });
 
   await db.insert(schema.artifacts).values({
-    id: randomUUID(),
+    id: artifactId,
     projectId: project.id,
+    runId,
     kind: "edit",
     title: `Editor polished drafts for ${draftSet.outlineTitle}`,
     filePath,
@@ -464,10 +563,21 @@ Critically review these variants for Gate 3 selection.`;
   const result = await runAgent({ agent: agents.critic, prompt, maxTokens: 3600 });
   const now = new Date();
   const filePath = await writeArtifact(project.rootPath, "reviews", "critic-review", JSON.stringify(result, null, 2));
+  const reviewArtifactId = randomUUID();
+  const runId = await recordWorkflowRun({
+    agentId: "critic",
+    artifactId: reviewArtifactId,
+    currentStep: "reviewing",
+    projectId: project.id,
+    stepType: "agent",
+    summary: `Critic reviewed ${sourceArtifact.title}.`,
+    title: "Run Critic review",
+  });
 
   await db.insert(schema.artifacts).values({
-    id: randomUUID(),
+    id: reviewArtifactId,
     projectId: project.id,
+    runId,
     kind: "review",
     title: `Critic review for ${sourceArtifact.title}`,
     filePath,
@@ -510,10 +620,20 @@ export async function selectFinalVariantForProject(formData: FormData) {
   };
   const now = new Date();
   const filePath = await writeArtifact(project.rootPath, "selected-finals", `final-${variant.id}`, JSON.stringify(finalManuscript, null, 2));
+  const artifactId = randomUUID();
+  const runId = await recordWorkflowRun({
+    artifactId,
+    currentStep: "final_selection",
+    projectId: project.id,
+    stepType: "gate",
+    summary: `Selected ${variant.title} as the Gate 3 final manuscript.`,
+    title: "Select Gate 3 final manuscript",
+  });
 
   await db.insert(schema.artifacts).values({
-    id: randomUUID(),
+    id: artifactId,
     projectId: project.id,
+    runId,
     kind: "selected_final",
     title: `Selected final: ${variant.title}`,
     filePath,
@@ -558,10 +678,21 @@ Generate a conservative memory patch proposal. Do not apply changes.`;
   const result = await runAgent({ agent: agents.archivist, prompt, maxTokens: 3200 });
   const now = new Date();
   const filePath = await writeArtifact(project.rootPath, "memory-patches", "archivist-memory-patch", JSON.stringify(result, null, 2));
+  const artifactId = randomUUID();
+  const runId = await recordWorkflowRun({
+    agentId: "archivist",
+    artifactId,
+    currentStep: "memory_patch",
+    projectId: project.id,
+    stepType: "agent",
+    summary: `Archivist generated a memory patch for ${finalManuscript.title}.`,
+    title: "Generate Archivist memory patch",
+  });
 
   await db.insert(schema.artifacts).values({
-    id: randomUUID(),
+    id: artifactId,
     projectId: project.id,
+    runId,
     kind: "memory_patch",
     title: `Memory patch for ${finalManuscript.title}`,
     filePath,
@@ -606,10 +737,20 @@ export async function applyMemoryPatchForProject(formData: FormData) {
   };
   const now = new Date();
   const filePath = await writeArtifact(project.rootPath, "memory-patches/applied", "applied-memory-patch", JSON.stringify(appliedRecord, null, 2));
+  const artifactId = randomUUID();
+  const runId = await recordWorkflowRun({
+    artifactId,
+    currentStep: "memory_apply",
+    projectId: project.id,
+    stepType: "system",
+    summary: `Applied memory patch: ${patch.summary.slice(0, 80)}.`,
+    title: "Apply approved memory patch",
+  });
 
   await db.insert(schema.artifacts).values({
-    id: randomUUID(),
+    id: artifactId,
     projectId: project.id,
+    runId,
     kind: "memory_patch",
     title: `Applied memory patch: ${patch.summary.slice(0, 80)}`,
     filePath,
