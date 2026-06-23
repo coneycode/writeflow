@@ -8,7 +8,7 @@ type SubmitButtonProps = {
   className?: string;
 };
 
-export function SubmitButton({ children, pendingText = "Working...", className }: SubmitButtonProps) {
+export function SubmitButton({ children, pendingText = "处理中...", className }: SubmitButtonProps) {
   const { pending } = useFormStatus();
 
   return (
