@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
-import { getProject } from "@/app/actions";
+import { getProject, listProjectRuns } from "@/app/actions";
 
 export default async function RunsPage({ params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = await params;
@@ -11,18 +11,82 @@ export default async function RunsPage({ params }: { params: Promise<{ projectId
     notFound();
   }
 
+  const runs = await listProjectRuns(project.id);
+
   return (
     <main className="min-h-screen bg-stone-950 px-6 py-8 text-stone-100">
-      <div className="mx-auto max-w-5xl">
+      <div className="mx-auto max-w-6xl">
         <Link href={`/projects/${project.id}`} className="text-sm text-stone-500 transition hover:text-amber-200">
           Back to workspace
         </Link>
-        <section className="mt-6 rounded-3xl border border-stone-800 bg-stone-900/70 p-8">
+        <header className="mt-4 flex flex-col gap-2 border-b border-stone-800 pb-6">
           <p className="text-xs uppercase tracking-[0.3em] text-amber-300">Run history</p>
-          <h1 className="mt-3 text-3xl font-semibold">No runs yet</h1>
-          <p className="mt-3 max-w-2xl text-stone-400">
-            Future workflow runs will appear here with agent steps, gate choices, artifacts, and memory patches for replay and comparison.
+          <h1 className="text-3xl font-semibold">{project.name}</h1>
+          <p className="text-sm text-stone-400">
+            Chronological workflow actions, generated artifacts, and gate/system steps for this project.
           </p>
+        </header>
+
+        <section className="mt-6 space-y-4">
+          {runs.length === 0 ? (
+            <div className="rounded-3xl border border-dashed border-stone-700 bg-stone-900/60 p-8 text-stone-500">
+              No runs yet. Generate Muse directions or continue the workflow to record history.
+            </div>
+          ) : (
+            runs.map(({ artifacts, run, steps }) => (
+              <article key={run.id} className="rounded-3xl border border-stone-800 bg-stone-900/70 p-5">
+                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.25em] text-amber-300">{run.workflow}</p>
+                    <h2 className="mt-2 text-xl font-semibold">{run.summary}</h2>
+                    <p className="mt-1 font-mono text-xs text-stone-500">{run.id}</p>
+                  </div>
+                  <div className="text-left text-xs text-stone-500 md:text-right">
+                    <p>Status: {run.status}</p>
+                    <p>Step: {run.currentStep}</p>
+                    <p>{run.createdAt.toLocaleString()}</p>
+                  </div>
+                </div>
+
+                <div className="mt-5 grid gap-4 lg:grid-cols-2">
+                  <div className="rounded-2xl border border-stone-800 bg-stone-950/70 p-4">
+                    <h3 className="text-sm font-medium text-stone-200">Steps</h3>
+                    <div className="mt-3 space-y-3">
+                      {steps.map((step) => (
+                        <div key={step.id} className="rounded-xl bg-stone-900 p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-sm text-stone-200">{step.title}</p>
+                            <span className="rounded-full bg-stone-800 px-2 py-1 text-[11px] text-stone-400">{step.stepType}</span>
+                          </div>
+                          <p className="mt-1 text-xs text-stone-500">Agent: {step.agentId ?? "human/system"}</p>
+                          <p className="mt-1 text-xs text-stone-500">Status: {step.status}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-stone-800 bg-stone-950/70 p-4">
+                    <h3 className="text-sm font-medium text-stone-200">Artifacts</h3>
+                    <div className="mt-3 space-y-3">
+                      {artifacts.length === 0 ? (
+                        <p className="text-sm text-stone-500">No artifact linked to this run.</p>
+                      ) : (
+                        artifacts.map((artifact) => (
+                          <div key={artifact.id} className="rounded-xl bg-stone-900 p-3">
+                            <div className="flex items-center justify-between gap-3">
+                              <p className="text-sm text-stone-200">{artifact.title}</p>
+                              <span className="rounded-full bg-stone-800 px-2 py-1 text-[11px] text-stone-400">{artifact.kind}</span>
+                            </div>
+                            <p className="mt-2 break-all font-mono text-xs text-stone-500">{artifact.filePath}</p>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </article>
+            ))
+          )}
         </section>
       </div>
     </main>
