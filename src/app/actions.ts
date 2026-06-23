@@ -83,6 +83,28 @@ export async function getProject(projectId: string) {
   return project ?? null;
 }
 
+
+export async function updateProjectMemoryFile(formData: FormData) {
+  "use server";
+
+  const projectId = String(formData.get("projectId") ?? "");
+  const target = String(formData.get("target") ?? "");
+  const content = String(formData.get("content") ?? "");
+  const project = await getProject(projectId);
+
+  if (!project) {
+    throw new Error("Project not found.");
+  }
+
+  const { resolved } = resolveMemoryTarget(project.rootPath, target);
+  await fs.mkdir(path.dirname(resolved), { recursive: true });
+  await fs.writeFile(resolved, content, "utf8");
+
+  await db.update(schema.projects).set({ updatedAt: new Date() }).where(eq(schema.projects.id, project.id));
+  revalidatePath(`/projects/${project.id}`);
+  revalidatePath(`/projects/${project.id}/memory`);
+}
+
 export async function listProjectArtifacts(projectId: string, kind?: "direction" | "outline" | "draft" | "edit" | "review" | "selected_final" | "memory_patch") {
   const rows = await db.select().from(schema.artifacts).where(eq(schema.artifacts.projectId, projectId)).orderBy(desc(schema.artifacts.createdAt));
   return kind ? rows.filter((artifact) => artifact.kind === kind) : rows;
