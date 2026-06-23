@@ -3,9 +3,9 @@ import Link from "next/link";
 import { createProject, listProjects } from "./actions";
 
 const projectTypeLabels = {
-  novel: "Novel continuation",
-  story_edit: "Story editing",
-  proposal: "Proposal planning",
+  novel: "小说续写",
+  story_edit: "故事编辑",
+  proposal: "方案规划",
 };
 
 export default async function Home() {
@@ -18,38 +18,38 @@ export default async function Home() {
           <div>
             <p className="text-sm uppercase tracking-[0.35em] text-amber-300">Writeflow</p>
             <h1 className="mt-3 text-4xl font-semibold tracking-tight md:text-6xl">
-              Human-in-the-loop writing studio.
+              人机协作写作工作台。
             </h1>
             <p className="mt-4 max-w-2xl text-stone-400">
-              A standalone multi-agent workspace for novel continuation, story editing, and proposal planning.
+              一套独立的多 Agent 写作协作系统，支持小说续写、故事编辑和方案规划。
             </p>
           </div>
           <Link
             href="/settings"
             className="rounded-full border border-stone-700 px-4 py-2 text-sm text-stone-300 transition hover:border-amber-300 hover:text-amber-200"
           >
-            Settings
+            设置
           </Link>
         </header>
 
         <div className="grid gap-6 lg:grid-cols-[360px_1fr]">
           <form action={createProject} className="rounded-3xl border border-stone-800 bg-stone-900/70 p-6 shadow-2xl shadow-black/20">
-            <h2 className="text-xl font-semibold">New project</h2>
-            <p className="mt-2 text-sm text-stone-400">Create a local-first project with memory templates.</p>
+            <h2 className="text-xl font-semibold">新建项目</h2>
+            <p className="mt-2 text-sm text-stone-400">创建本地优先项目，并自动初始化记忆模板。</p>
 
             <label className="mt-6 block text-sm text-stone-300" htmlFor="name">
-              Project name
+              项目名称
             </label>
             <input
               id="name"
               name="name"
               required
-              placeholder="The Glass City"
+              placeholder="玻璃之城"
               className="mt-2 w-full rounded-2xl border border-stone-700 bg-stone-950 px-4 py-3 text-stone-100 outline-none transition placeholder:text-stone-600 focus:border-amber-300"
             />
 
             <label className="mt-4 block text-sm text-stone-300" htmlFor="type">
-              Project type
+              项目类型
             </label>
             <select
               id="type"
@@ -57,37 +57,37 @@ export default async function Home() {
               defaultValue="novel"
               className="mt-2 w-full rounded-2xl border border-stone-700 bg-stone-950 px-4 py-3 text-stone-100 outline-none transition focus:border-amber-300"
             >
-              <option value="novel">Novel continuation</option>
-              <option value="story_edit">Story editing</option>
-              <option value="proposal">Proposal planning</option>
+              <option value="novel">小说续写</option>
+              <option value="story_edit">故事编辑</option>
+              <option value="proposal">方案规划</option>
             </select>
 
             <label className="mt-4 block text-sm text-stone-300" htmlFor="description">
-              Brief description
+              简要描述
             </label>
             <textarea
               id="description"
               name="description"
               rows={4}
-              placeholder="A sentence about the project goal."
+              placeholder="用一句话描述项目目标。"
               className="mt-2 w-full rounded-2xl border border-stone-700 bg-stone-950 px-4 py-3 text-stone-100 outline-none transition placeholder:text-stone-600 focus:border-amber-300"
             />
 
             <button className="mt-6 w-full rounded-2xl bg-amber-300 px-5 py-3 font-medium text-stone-950 transition hover:bg-amber-200">
-              Create project
+              创建项目
             </button>
           </form>
 
           <section className="rounded-3xl border border-stone-800 bg-stone-900/50 p-6">
             <div className="flex items-center justify-between">
-              <h2 className="text-xl font-semibold">Recent projects</h2>
-              <span className="text-sm text-stone-500">{projects.length} total</span>
+              <h2 className="text-xl font-semibold">最近项目</h2>
+              <span className="text-sm text-stone-500">{projects.length} 个项目</span>
             </div>
 
             <div className="mt-6 grid gap-4">
               {projects.length === 0 ? (
                 <div className="rounded-2xl border border-dashed border-stone-700 p-8 text-center text-stone-500">
-                  No projects yet. Create a novel project to initialize memory, artifacts, and runs.
+                  还没有项目。创建一个小说项目后会初始化记忆、产物和运行记录。
                 </div>
               ) : (
                 projects.map((project) => (

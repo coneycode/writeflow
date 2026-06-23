@@ -9,23 +9,23 @@ export function WorkspaceShell({ children, project }: { children: React.ReactNod
         <header className="flex flex-col gap-4 rounded-3xl border border-stone-800 bg-stone-900/70 p-6 md:flex-row md:items-center md:justify-between">
           <div>
             <Link href="/" className="text-sm text-stone-500 transition hover:text-amber-200">
-              Back to projects
+              返回项目列表
             </Link>
             <h1 className="mt-2 text-3xl font-semibold">{project.name}</h1>
-            <p className="mt-1 text-sm text-stone-400">{project.description || "No description yet."}</p>
+            <p className="mt-1 text-sm text-stone-400">{project.description || "暂无描述。"}</p>
           </div>
           <nav className="flex flex-wrap gap-2 text-sm">
             <Link className="rounded-full bg-amber-300 px-4 py-2 text-stone-950" href={`/projects/${project.id}`}>
-              Workspace
+              工作台
             </Link>
             <Link className="rounded-full border border-stone-700 px-4 py-2 text-stone-300" href={`/projects/${project.id}/memory`}>
-              Memory
+              记忆
             </Link>
             <Link className="rounded-full border border-stone-700 px-4 py-2 text-stone-300" href={`/projects/${project.id}/runs`}>
-              Runs
+              运行记录
             </Link>
             <Link className="rounded-full border border-stone-700 px-4 py-2 text-stone-300" href={`/projects/${project.id}/settings`}>
-              Settings
+              设置
             </Link>
           </nav>
         </header>

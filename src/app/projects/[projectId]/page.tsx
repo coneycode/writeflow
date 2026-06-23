@@ -45,11 +45,11 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
         <section className="rounded-3xl border border-stone-800 bg-stone-900/70 p-5">
           <div className="flex items-center justify-between border-b border-stone-800 pb-4">
             <div>
-              <p className="text-xs uppercase tracking-[0.3em] text-amber-300">Novel workflow</p>
-              <h2 className="mt-2 text-2xl font-semibold">Continuation workspace</h2>
+              <p className="text-xs uppercase tracking-[0.3em] text-amber-300">小说工作流</p>
+              <h2 className="mt-2 text-2xl font-semibold">续写工作台</h2>
             </div>
             <button className="rounded-2xl bg-amber-300 px-4 py-2 text-sm font-medium text-stone-950 opacity-60" disabled>
-              Start workflow soon
+              工作流即将可用
             </button>
           </div>
 
