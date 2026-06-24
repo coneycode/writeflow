@@ -88,6 +88,15 @@ export const novelMemoryTemplates: MemoryTemplateFile[] = [
 - Unmotivated emotional conclusions
 `,
   },
+
+  {
+    path: "manuscript/context.md",
+    content: `# Manuscript Context
+
+Paste the latest upstream manuscript here. All continuation steps must use this text as the immediate source context.
+
+`,
+  },
   {
     path: "artifacts/.gitkeep",
     content: "",

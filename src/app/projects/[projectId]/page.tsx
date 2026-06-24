@@ -9,6 +9,7 @@ import {
   listOutlineArtifacts,
   listReviewArtifacts,
   listSelectedFinalArtifacts,
+  readProjectManuscriptContext,
 } from "@/app/actions";
 import { AgentSidebar } from "@/components/workspace/agent-sidebar";
 import { ArchitectPanel } from "@/components/workspace/architect-panel";
@@ -17,6 +18,7 @@ import { EditorPanel } from "@/components/workspace/editor-panel";
 import { FinalSelectionPanel } from "@/components/workspace/final-selection-panel";
 import { MemoryPatchPanel } from "@/components/workspace/memory-patch-panel";
 import { MemorySidebar } from "@/components/workspace/memory-sidebar";
+import { ManuscriptContextPanel } from "@/components/workspace/manuscript-context-panel";
 import { MusePanel } from "@/components/workspace/muse-panel";
 import { ScribePanel } from "@/components/workspace/scribe-panel";
 import { WorkflowGates } from "@/components/workspace/workflow-gates";
@@ -37,6 +39,7 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
   const reviewArtifacts = await listReviewArtifacts(project.id);
   const selectedFinalArtifacts = await listSelectedFinalArtifacts(project.id);
   const memoryPatchArtifacts = await listMemoryPatchArtifacts(project.id);
+  const manuscriptContext = await readProjectManuscriptContext(project.id);
 
   return (
     <WorkspaceShell project={project}>
@@ -54,6 +57,7 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
           </div>
 
           <div className="mt-6 grid gap-4">
+            <ManuscriptContextPanel content={manuscriptContext} projectId={project.id} />
             <MusePanel directionArtifacts={directionArtifacts} projectId={project.id} />
             <WorkflowGates />
             <ArchitectPanel outlineArtifacts={outlineArtifacts} projectId={project.id} />

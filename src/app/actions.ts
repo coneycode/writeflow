@@ -139,6 +139,50 @@ export async function getProject(projectId: string) {
 }
 
 
+
+function manuscriptContextPath(rootPath: string) {
+  return path.join(rootPath, "manuscript/context.md");
+}
+
+export async function readProjectManuscriptContext(projectId: string) {
+  const project = await getProject(projectId);
+  if (!project) {
+    return "";
+  }
+
+  try {
+    return await fs.readFile(manuscriptContextPath(project.rootPath), "utf8");
+  } catch {
+    return "";
+  }
+}
+
+async function requireProjectManuscriptContext(project: NonNullable<Awaited<ReturnType<typeof getProject>>>) {
+  const content = (await readProjectManuscriptContext(project.id)).trim();
+  if (!content) {
+    throw new Error("续写必须基于上文。请先在工作台的“续写上文”区域粘贴并保存文章上文。");
+  }
+  return content;
+}
+
+export async function updateProjectManuscriptContext(formData: FormData) {
+  "use server";
+
+  const projectId = String(formData.get("projectId") ?? "");
+  const content = String(formData.get("content") ?? "");
+  const project = await getProject(projectId);
+
+  if (!project) {
+    throw new Error("Project not found.");
+  }
+
+  const target = manuscriptContextPath(project.rootPath);
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, content, "utf8");
+  await db.update(schema.projects).set({ updatedAt: new Date() }).where(eq(schema.projects.id, project.id));
+  revalidatePath(`/projects/${project.id}`);
+}
+
 export async function updateProjectMemoryFile(formData: FormData) {
   "use server";
 
@@ -486,8 +530,12 @@ export async function runEditorForProject(formData: FormData) {
     throw new Error("Unable to read draft artifact.");
   }
 
+  const manuscriptContext = await requireProjectManuscriptContext(project);
   const recall = await buildNovelRecallContext(project.rootPath);
   const prompt = `Project: ${project.name}
+
+续写上文（润色必须保持与此上文连续）:
+${manuscriptContext}
 
 Draft variants:
 ${JSON.stringify(draftSet, null, 2)}
@@ -548,8 +596,12 @@ export async function runCriticForProject(formData: FormData) {
     throw new Error("Unable to read review source artifact.");
   }
 
+  const manuscriptContext = await requireProjectManuscriptContext(project);
   const recall = await buildNovelRecallContext(project.rootPath);
   const prompt = `Project: ${project.name}
+
+续写上文（审稿必须检查是否承接此上文）:
+${manuscriptContext}
 
 Review source artifact kind: ${artifactKind}
 
