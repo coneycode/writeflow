@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import type { ProjectView } from "./artifact-types";
+import { GenerationProcessPanel } from "./generation-process-panel";
 
 export function WorkspaceShell({ children, project }: { children: React.ReactNode; project: ProjectView }) {
   return (
@@ -31,6 +32,7 @@ export function WorkspaceShell({ children, project }: { children: React.ReactNod
         </header>
         {children}
       </div>
+      <GenerationProcessPanel />
     </main>
   );
 }

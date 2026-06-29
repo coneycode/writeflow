@@ -1,4 +1,4 @@
-const agentItems = ["Archivist", "Muse", "Architect", "Scribe", "Editor", "Critic"];
+const agentItems = ["记忆管理员", "构思师", "架构师", "写作智能体", "编辑智能体", "审稿智能体"];
 
 export function AgentSidebar() {
   return (

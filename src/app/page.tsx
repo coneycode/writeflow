@@ -8,6 +8,11 @@ const projectTypeLabels = {
   proposal: "方案规划",
 };
 
+const projectStatusLabels = {
+  active: "进行中",
+  archived: "已归档",
+};
+
 export default async function Home() {
   const projects = await listProjects();
 
@@ -21,7 +26,7 @@ export default async function Home() {
               人机协作写作工作台。
             </h1>
             <p className="mt-4 max-w-2xl text-stone-400">
-              一套独立的多 Agent 写作协作系统，支持小说续写、故事编辑和方案规划。
+              一套独立的多智能体写作协作系统，支持小说续写、故事编辑和方案规划。
             </p>
           </div>
           <Link
@@ -101,7 +106,7 @@ export default async function Home() {
                         <h3 className="text-lg font-medium group-hover:text-amber-200">{project.name}</h3>
                         <p className="mt-1 text-sm text-stone-500">{projectTypeLabels[project.type]}</p>
                       </div>
-                      <span className="rounded-full bg-stone-800 px-3 py-1 text-xs text-stone-400">{project.status}</span>
+                      <span className="rounded-full bg-stone-800 px-3 py-1 text-xs text-stone-400">{projectStatusLabels[project.status]}</span>
                     </div>
                     {project.description ? <p className="mt-4 text-sm text-stone-400">{project.description}</p> : null}
                   </Link>

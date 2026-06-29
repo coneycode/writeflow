@@ -10,6 +10,14 @@ export const editedVariantSchema = z.object({
   manuscript: z.string(),
 });
 
+export const editedSegmentSchema = z.object({
+  sceneId: z.string(),
+  sceneTitle: z.string(),
+  changesMade: z.array(z.string()),
+  remainingConcerns: z.array(z.string()),
+  manuscript: z.string(),
+});
+
 export const editSetSchema = z.object({
   sourceDraftTitle: z.string(),
   variants: z.array(editedVariantSchema).min(1),
@@ -17,4 +25,5 @@ export const editSetSchema = z.object({
 });
 
 export type EditedVariant = z.infer<typeof editedVariantSchema>;
+export type EditedSegment = z.infer<typeof editedSegmentSchema>;
 export type EditSet = z.infer<typeof editSetSchema>;
