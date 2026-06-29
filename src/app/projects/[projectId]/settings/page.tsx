@@ -3,6 +3,12 @@ import { notFound } from "next/navigation";
 
 import { getProject } from "@/app/actions";
 
+const projectTypeLabels = {
+  novel: "小说续写",
+  story_edit: "故事编辑",
+  proposal: "方案规划",
+};
+
 export default async function ProjectSettingsPage({ params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = await params;
   const project = await getProject(projectId);
@@ -27,7 +33,7 @@ export default async function ProjectSettingsPage({ params }: { params: Promise<
             </div>
             <div className="rounded-2xl border border-stone-800 bg-stone-950/70 p-4">
               <p className="text-stone-200">工作流类型</p>
-              <p className="mt-2">{project.type}</p>
+              <p className="mt-2">{projectTypeLabels[project.type]}</p>
             </div>
           </div>
         </section>

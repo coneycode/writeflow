@@ -5,6 +5,8 @@ const providerSettingsSchema = z.object({
   apiKey: z.string().min(1),
   baseURL: z.string().url().default("https://api.openai.com/v1"),
   model: z.string().min(1).default("gpt-4.1"),
+  timeoutMs: z.coerce.number().int().positive().default(900000),
+  maxRetries: z.coerce.number().int().min(0).default(1),
 });
 
 export type ProviderSettings = z.infer<typeof providerSettingsSchema>;
@@ -22,6 +24,8 @@ export function loadProviderSettings(): ProviderSettings {
     apiKey: process.env.OPENAI_COMPATIBLE_API_KEY,
     baseURL: process.env.OPENAI_COMPATIBLE_BASE_URL ?? "https://api.openai.com/v1",
     model: process.env.OPENAI_COMPATIBLE_MODEL ?? "gpt-4.1",
+    timeoutMs: process.env.OPENAI_COMPATIBLE_TIMEOUT_MS,
+    maxRetries: process.env.OPENAI_COMPATIBLE_MAX_RETRIES,
   });
 
   if (!parsed.success) {
@@ -40,19 +44,38 @@ export class OpenAICompatibleProvider {
     this.client = new OpenAI({
       apiKey: settings.apiKey,
       baseURL: settings.baseURL,
+      timeout: settings.timeoutMs,
+      maxRetries: settings.maxRetries,
     });
   }
 
   async generateText(input: GenerateTextInput) {
-    const response = await this.client.chat.completions.create({
-      model: input.model ?? this.settings.model,
-      temperature: input.temperature ?? 0.8,
-      max_tokens: input.maxTokens ?? 1800,
-      messages: [
-        { role: "system", content: input.system },
-        { role: "user", content: input.prompt },
-      ],
-    });
+    const model = input.model ?? this.settings.model;
+    const maxTokens = input.maxTokens ?? 1800;
+    let response;
+
+    try {
+      response = await this.client.chat.completions.create({
+        model,
+        temperature: input.temperature ?? 0.8,
+        max_tokens: maxTokens,
+        messages: [
+          { role: "system", content: input.system },
+          { role: "user", content: input.prompt },
+        ],
+      });
+    } catch (error) {
+      console.error("OpenAI-compatible request failed", {
+        errorName: error instanceof Error ? error.name : "UnknownError",
+        message: error instanceof Error ? error.message : String(error),
+        maxRetries: this.settings.maxRetries,
+        maxTokens,
+        model,
+        promptCharacters: input.prompt.length,
+        timeoutMs: this.settings.timeoutMs,
+      });
+      throw error;
+    }
 
     const content = response.choices[0]?.message?.content;
     if (!content) {

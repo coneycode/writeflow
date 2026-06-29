@@ -12,7 +12,7 @@ export default function ProjectError({ error, reset }: { error: Error & { digest
         <p className="text-xs uppercase tracking-[0.3em] text-red-300">工作流错误</p>
         <h1 className="mt-3 text-3xl font-semibold">项目运行过程中出错。</h1>
         <p className="mt-3 text-sm leading-6 text-red-100/80">
-          {error.message || "工作流执行失败。请检查模型设置、API Key、Base URL 和项目记忆内容。"}
+          {error.message || "工作流执行失败。请检查模型设置、接口密钥、服务地址和项目记忆内容。"}
         </p>
         <div className="mt-6 flex flex-wrap gap-3">
           <button onClick={reset} className="rounded-2xl bg-red-300 px-4 py-2 text-sm font-medium text-stone-950 transition hover:bg-red-200">

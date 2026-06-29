@@ -17,5 +17,13 @@ export const criticReviewSchema = z.object({
   finalGateRecommendation: z.string(),
 });
 
+export const variantReviewSchema = z.object({
+  verdict: z.enum(["pass", "revise", "reject"]),
+  summary: z.string(),
+  issues: z.array(reviewIssueSchema),
+  variantId: z.string(),
+});
+
 export type ReviewIssue = z.infer<typeof reviewIssueSchema>;
 export type CriticReview = z.infer<typeof criticReviewSchema>;
+export type VariantReview = z.infer<typeof variantReviewSchema>;

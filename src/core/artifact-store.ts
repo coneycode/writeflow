@@ -17,6 +17,17 @@ export async function writeArtifact(rootPath: string, kind: string, title: strin
   return relativePath;
 }
 
+export async function overwriteArtifact(rootPath: string, relativePath: string, content: string) {
+  const target = path.resolve(rootPath, relativePath);
+  const artifactRoot = path.resolve(rootPath, "artifacts");
+
+  if (!target.startsWith(artifactRoot + path.sep)) {
+    throw new Error(`Artifact path escapes project artifacts: ${relativePath}`);
+  }
+
+  await fs.writeFile(target, content, "utf8");
+}
+
 export async function readJsonArtifact<T>(rootPath: string, relativePath: string): Promise<T | null> {
   try {
     const content = await fs.readFile(path.join(rootPath, relativePath), "utf8");
