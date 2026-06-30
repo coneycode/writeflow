@@ -17,6 +17,8 @@ export type GenerateTextInput = {
   temperature?: number;
   maxTokens?: number;
   model?: string;
+  /** 提供后，使用流式请求并对每个增量片段回调（用于实时进度展示）。 */
+  onToken?: (token: string) => void;
 };
 
 export function loadProviderSettings(): ProviderSettings {
@@ -52,18 +54,48 @@ export class OpenAICompatibleProvider {
   async generateText(input: GenerateTextInput) {
     const model = input.model ?? this.settings.model;
     const maxTokens = input.maxTokens ?? 1800;
-    let response;
+    const messages = [
+      { role: "system" as const, content: input.system },
+      { role: "user" as const, content: input.prompt },
+    ];
 
     try {
-      response = await this.client.chat.completions.create({
+      if (input.onToken) {
+        const stream = await this.client.chat.completions.create({
+          model,
+          temperature: input.temperature ?? 0.8,
+          max_tokens: maxTokens,
+          messages,
+          stream: true,
+        });
+
+        let content = "";
+        for await (const chunk of stream) {
+          const token = chunk.choices[0]?.delta?.content ?? "";
+          if (token) {
+            content += token;
+            input.onToken(token);
+          }
+        }
+
+        if (!content) {
+          throw new Error("Model returned an empty response.");
+        }
+        return content;
+      }
+
+      const response = await this.client.chat.completions.create({
         model,
         temperature: input.temperature ?? 0.8,
         max_tokens: maxTokens,
-        messages: [
-          { role: "system", content: input.system },
-          { role: "user", content: input.prompt },
-        ],
+        messages,
       });
+
+      const content = response.choices[0]?.message?.content;
+      if (!content) {
+        throw new Error("Model returned an empty response.");
+      }
+      return content;
     } catch (error) {
       console.error("OpenAI-compatible request failed", {
         errorName: error instanceof Error ? error.name : "UnknownError",
@@ -72,16 +104,10 @@ export class OpenAICompatibleProvider {
         maxTokens,
         model,
         promptCharacters: input.prompt.length,
+        streaming: Boolean(input.onToken),
         timeoutMs: this.settings.timeoutMs,
       });
       throw error;
     }
-
-    const content = response.choices[0]?.message?.content;
-    if (!content) {
-      throw new Error("Model returned an empty response.");
-    }
-
-    return content;
   }
 }

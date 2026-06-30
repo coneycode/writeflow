@@ -1,8 +1,23 @@
 import { z } from "zod";
 
+const operationAliases: Record<string, "append" | "update" | "open_thread" | "close_thread"> = {
+  replace: "update",
+  overwrite: "update",
+  set: "update",
+  add: "append",
+  create: "append",
+  open: "open_thread",
+  close: "close_thread",
+};
+
 export const memoryPatchChangeSchema = z.object({
   target: z.string(),
-  operation: z.enum(["append", "update", "open_thread", "close_thread"]),
+  // 模型有时返回 schema 外的近义枚举（如 "replace"），这里做归一化兜底，
+  // 避免一个枚举差异让整个记忆补丁任务失败。
+  operation: z.preprocess(
+    (value) => (typeof value === "string" ? operationAliases[value] ?? value : value),
+    z.enum(["append", "update", "open_thread", "close_thread"]),
+  ),
   content: z.string(),
   reason: z.string(),
   requiresApproval: z.boolean(),

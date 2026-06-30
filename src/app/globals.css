@@ -1,13 +1,28 @@
 @import "tailwindcss";
 
 :root {
+  /* 深色机身（左右控制栏） */
   --background: #0c0a09;
   --foreground: #fafaf9;
+
+  /* 浅色文档区（中栏写作/阅读本体） */
+  --doc-surface: #fafaf9;
+  --doc-card: #ffffff;
+  --doc-border: #e7e5e4;
+  --doc-text: #44403c;
+  --doc-muted: #78716c;
+  --doc-accent: #9a6a3c;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-doc-surface: var(--doc-surface);
+  --color-doc-card: var(--doc-card);
+  --color-doc-border: var(--doc-border);
+  --color-doc-text: var(--doc-text);
+  --color-doc-muted: var(--doc-muted);
+  --color-doc-accent: var(--doc-accent);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
@@ -27,4 +42,27 @@ input,
 textarea,
 select {
   font: inherit;
+}
+
+/* 文档区正文阅读样式：用于中栏浅色写作/阅读区的长文 */
+.doc-prose {
+  color: var(--doc-text);
+  font-family: var(--font-sans);
+  line-height: 1.85;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@keyframes writeflow-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.stage-pulse {
+  animation: writeflow-pulse 1.6s ease-in-out infinite;
 }

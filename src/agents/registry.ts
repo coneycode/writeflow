@@ -1,7 +1,7 @@
 import { beatSheetSchema } from "@/schemas/beat-sheet";
 import { directionSetSchema } from "@/schemas/direction";
 import { draftSegmentSchema, draftSetSchema, draftVariantSchema } from "@/schemas/draft";
-import { editedSegmentSchema, editedVariantSchema, editSetSchema } from "@/schemas/edit";
+import { editedSegmentSchema, editedVariantSchema, editSetSchema, revisedVariantSchema } from "@/schemas/edit";
 import { criticReviewSchema, variantReviewSchema } from "@/schemas/review";
 import { finalManuscriptDigestSchema, memoryPatchSchema } from "@/schemas/memory-patch";
 import type { AgentDefinition } from "@/schemas/agent";
@@ -402,8 +402,10 @@ Rules:
 - Do not rewrite the manuscript.
 - Do not directly modify canon; propose changes only.
 - Be conservative with canon. Facts must be clearly supported by the final manuscript.
+- The supplied 前情 (prior manuscript context) is already-established background. Do NOT propose memory changes that merely restate facts already present in the 前情 or current memory; only capture what is genuinely new or changed in the selected final manuscript.
 - Update progress state and open threads when appropriate.
 - Mark every change as requiring approval.
+- "operation" MUST be exactly one of: "append", "update", "open_thread", "close_thread". Use "update" to replace a file's content; never invent other values such as "replace".
 - Return strict JSON only, with no markdown fences or commentary.
 
 JSON shape:
@@ -423,6 +425,33 @@ JSON shape:
 }`,
 };
 
+export const editorReviseAgent: AgentDefinition<typeof revisedVariantSchema> = {
+  id: "editor",
+  name: "Editor",
+  role: "Revision agent that fixes a manuscript variant according to selected review issues",
+  temperature: 0.4,
+  outputSchema: revisedVariantSchema,
+  systemPrompt: `You are Editor, the revision agent in Writeflow.
+
+Revise one manuscript variant to resolve a specific list of review issues.
+
+Rules:
+- Fix ONLY the supplied review issues. Preserve everything else as-is.
+- Do not introduce new plot turns or new canon facts; keep the approved story logic.
+- Keep continuity with the supplied manuscript context (do not restate it).
+- Address each issue using its suggestedFix where reasonable; if an issue cannot be fixed without breaking story logic, leave it and note it in remainingConcerns.
+- Remove generic AI phrasing and empty lyricism.
+- Return the COMPLETE revised manuscript for this variant (not a diff), plus what you changed and what concerns remain.
+- Return strict JSON only, with no markdown fences or commentary.
+
+JSON shape:
+{
+  "manuscript": "Full revised prose for this variant",
+  "changesMade": ["Specific change tied to an issue"],
+  "remainingConcerns": ["Issue left unresolved and why"]
+}`,
+};
+
 export const agents = {
   muse: museAgent,
   architect: architectAgent,
@@ -432,6 +461,7 @@ export const agents = {
   editor: editorAgent,
   editorVariant: editorVariantAgent,
   editorSegment: editorSegmentAgent,
+  editorRevise: editorReviseAgent,
   critic: criticAgent,
   criticVariant: criticVariantAgent,
   archivist: archivistAgent,

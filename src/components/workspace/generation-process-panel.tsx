@@ -1,104 +1,290 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 
-type GenerationProcessDetail = {
+type RunStepStatus = "running" | "completed" | "failed";
+type RunStatus = "running" | "completed" | "failed" | "interrupted" | "missing";
+
+type RunStep = {
+  id: string;
   agent: string;
-  description: string;
-  steps?: string[];
+  label: string;
+  status: RunStepStatus;
+  promptPreview: string;
+  output: string;
+  startedAt: string;
+  endedAt?: string;
+};
+
+type RunState = {
+  runId: string;
   title: string;
+  status: RunStatus;
+  startedAt: string;
+  updatedAt: string;
+  error?: string;
+  steps: RunStep[];
 };
 
-type GenerationProcessState = GenerationProcessDetail & {
-  startedAt: number;
-  status: "running" | "idle";
+const statusLabels: Record<RunStatus, string> = {
+  running: "运行中",
+  completed: "已完成",
+  failed: "失败",
+  interrupted: "已中断",
+  missing: "无记录",
 };
 
-const defaultSteps = ["整理上下文", "请求大模型", "解析结构化结果", "写入项目文件", "刷新工作台"];
-
-function formatDuration(startedAt: number) {
-  const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+function elapsedLabel(startedAt: string, endedAt?: string) {
+  const start = new Date(startedAt).getTime();
+  const end = endedAt ? new Date(endedAt).getTime() : Date.now();
+  const seconds = Math.max(0, Math.floor((end - start) / 1000));
   const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = seconds % 60;
-
-  if (minutes === 0) {
-    return `${remainingSeconds} 秒`;
-  }
-
-  return `${minutes} 分 ${remainingSeconds} 秒`;
+  const rest = seconds % 60;
+  return minutes === 0 ? `${rest} 秒` : `${minutes} 分 ${rest} 秒`;
 }
 
-export function GenerationProcessPanel() {
-  const [process, setProcess] = useState<GenerationProcessState | null>(null);
-  const [elapsed, setElapsed] = useState("0 秒");
-  const steps = useMemo(() => process?.steps?.filter(Boolean) ?? defaultSteps, [process?.steps]);
-
-  useEffect(() => {
-    function handleStart(event: Event) {
-      const detail = (event as CustomEvent<GenerationProcessDetail>).detail;
-      setProcess({ ...detail, startedAt: Date.now(), status: "running" });
-      setElapsed("0 秒");
-    }
-
-    function handleEnd() {
-      setProcess((current) => (current ? { ...current, status: "idle" } : current));
-    }
-
-    window.addEventListener("writeflow:generation-start", handleStart);
-    window.addEventListener("writeflow:generation-end", handleEnd);
-
-    return () => {
-      window.removeEventListener("writeflow:generation-start", handleStart);
-      window.removeEventListener("writeflow:generation-end", handleEnd);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!process || process.status !== "running") {
-      return;
-    }
-
-    const timer = window.setInterval(() => {
-      setElapsed(formatDuration(process.startedAt));
-    }, 1000);
-
-    return () => window.clearInterval(timer);
-  }, [process]);
-
-  if (!process) {
-    return null;
+function StepDot({ status }: { status: RunStepStatus }) {
+  if (status === "completed") {
+    return <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-green-400" />;
   }
+  if (status === "failed") {
+    return <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-red-400" />;
+  }
+  return <span className="stage-pulse mt-1 h-2 w-2 shrink-0 rounded-full bg-amber-300" />;
+}
+
+function StepCard({ step, defaultOpen }: { step: RunStep; defaultOpen: boolean }) {
+  const outputRef = useRef<HTMLPreElement | null>(null);
+
+  useEffect(() => {
+    // 当前运行步骤：输出自动滚到底，跟随逐字流。
+    if (step.status === "running" && outputRef.current) {
+      outputRef.current.scrollTop = outputRef.current.scrollHeight;
+    }
+  }, [step.output, step.status]);
 
   return (
-    <aside className="fixed bottom-5 right-5 z-50 w-[360px] max-w-[calc(100vw-2rem)] rounded-3xl border border-amber-300/30 bg-stone-950/95 p-4 text-stone-100 shadow-2xl shadow-black/40 backdrop-blur">
-      <div className="flex items-start justify-between gap-4">
+    <details open={defaultOpen} className="rounded-xl border border-stone-800 bg-stone-950/70 p-3">
+      <summary className="flex cursor-pointer items-start justify-between gap-2">
+        <span className="flex items-start gap-2">
+          <StepDot status={step.status} />
+          <span>
+            <span className="text-xs font-medium text-stone-200">{step.label}</span>
+            <span className="mt-0.5 block text-[11px] text-stone-500">{step.agent}</span>
+          </span>
+        </span>
+        <span className="shrink-0 text-[11px] text-stone-500">{elapsedLabel(step.startedAt, step.endedAt)}</span>
+      </summary>
+
+      {step.promptPreview ? (
+        <div className="mt-3">
+          <p className="text-[11px] font-medium text-stone-500">发送内容（节选）</p>
+          <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-lg border border-stone-800 bg-stone-900/70 p-2 text-[11px] leading-5 text-stone-400">
+            {step.promptPreview}
+          </pre>
+        </div>
+      ) : null}
+
+      <div className="mt-3">
+        <p className="text-[11px] font-medium text-stone-500">模型输出{step.status === "running" ? "（生成中…）" : ""}</p>
+        <pre
+          ref={outputRef}
+          className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap rounded-lg border border-stone-800 bg-stone-900/70 p-2 text-[11px] leading-5 text-stone-300"
+        >
+          {step.output || (step.status === "running" ? "…" : "（无输出）")}
+        </pre>
+      </div>
+    </details>
+  );
+}
+
+export function GenerationProcessPanel({ projectId }: { projectId: string }) {
+  const router = useRouter();
+  const [state, setState] = useState<RunState | null>(null);
+  const [, forceTick] = useState(0);
+  const sourceRef = useRef<EventSource | null>(null);
+  const connectedRunRef = useRef<string | null>(null);
+  const refreshedRef = useRef<string | null>(null);
+  // 已到达终态（完成/失败/缺失）的 runId，避免结束后还重连。
+  const settledRef = useRef<string | null>(null);
+  // 持有最新 connect，供 onerror 重连时调用，避免 useCallback 自引用依赖循环。
+  const connectRef = useRef<((runId: string) => void) | null>(null);
+
+  const connect = useCallback((runId: string) => {
+    if (connectedRunRef.current === runId && sourceRef.current) {
+      return;
+    }
+    sourceRef.current?.close();
+    connectedRunRef.current = runId;
+
+    const source = new EventSource(`/api/projects/${projectId}/runs/${runId}/stream`);
+    sourceRef.current = source;
+
+    source.onmessage = (event) => {
+      try {
+        const next = JSON.parse(event.data) as RunState & { status: RunStatus };
+        // state.json 不存在等异常 payload（如 {status:"missing"}）没有 steps，
+        // 不当作有效进度状态，直接关闭重连。
+        if (!Array.isArray(next.steps)) {
+          // 异常 payload（如 {status:"missing"}）：标记终态，不再重连。
+          settledRef.current = runId;
+          source.close();
+          sourceRef.current = null;
+          connectedRunRef.current = null;
+          return;
+        }
+        setState(next);
+        if (next.status !== "running") {
+          settledRef.current = next.runId;
+          source.close();
+          sourceRef.current = null;
+          connectedRunRef.current = null;
+          // 完成后拉取新产物（后台任务不能调 revalidatePath）。
+          if (next.status === "completed" && refreshedRef.current !== next.runId) {
+            refreshedRef.current = next.runId;
+            router.refresh();
+          }
+        }
+      } catch {
+        // 忽略解析失败的片段
+      }
+    };
+
+    source.onerror = () => {
+      source.close();
+      sourceRef.current = null;
+      connectedRunRef.current = null;
+      // 任务尚未结束就断连（长任务期间连接易被中间层掐断）：延迟重连同一 run。
+      // stream 路由对已完成的 run 会立即推终态再关闭，因此重连也能补到“完成”。
+      if (settledRef.current !== runId) {
+        setTimeout(() => {
+          if (settledRef.current !== runId && connectedRunRef.current !== runId) {
+            connectRef.current?.(runId);
+          }
+        }, 1000);
+      }
+    };
+  }, [projectId, router]);
+
+  // 保持 connectRef 指向最新 connect（供 onerror 重连调用）。
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
+
+  const findActive = useCallback(async () => {
+    try {
+      const response = await fetch(`/api/projects/${projectId}/active-run`, { cache: "no-store" });
+      const data = (await response.json()) as { runId: string | null; state: RunState | null };
+      if (data.runId) {
+        if (data.state) {
+          setState(data.state);
+        }
+        connect(data.runId);
+      }
+    } catch {
+      // 网络异常忽略，等待下次触发
+    }
+  }, [projectId, connect]);
+
+  // 挂载即尝试恢复正在运行的 run（刷新后不丢）。延到下一拍执行，
+  // 避免在 effect 体内同步触发 setState。
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void findActive();
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      sourceRef.current?.close();
+    };
+  }, [findActive]);
+
+  // 按钮提交后，轮询几次抓住新建的 run（server action 返回与 run 落库存在轻微时序差）。
+  useEffect(() => {
+    function handleSubmitted() {
+      let attempts = 0;
+      const timer = setInterval(() => {
+        attempts += 1;
+        void findActive();
+        if (attempts >= 6 || connectedRunRef.current) {
+          clearInterval(timer);
+        }
+      }, 500);
+    }
+
+    function handleSettled() {
+      void findActive();
+    }
+
+    window.addEventListener("writeflow:job-submitted", handleSubmitted);
+    window.addEventListener("writeflow:job-settled", handleSettled);
+    return () => {
+      window.removeEventListener("writeflow:job-submitted", handleSubmitted);
+      window.removeEventListener("writeflow:job-settled", handleSettled);
+    };
+  }, [findActive]);
+
+  // running 时每秒刷新一次耗时显示。
+  useEffect(() => {
+    if (state?.status !== "running") {
+      return;
+    }
+    const timer = setInterval(() => forceTick((value) => value + 1), 1000);
+    return () => clearInterval(timer);
+  }, [state?.status]);
+
+  if (!state) {
+    return (
+      <section className="rounded-2xl border border-stone-800 bg-stone-900/70 p-4">
+        <p className="text-sm font-medium text-stone-200">生成过程</p>
+        <p className="mt-2 text-xs leading-5 text-stone-500">触发任意生成操作后，这里会实时显示当前智能体、逐字输出与每步耗时；刷新页面也不会丢失。</p>
+      </section>
+    );
+  }
+
+  const steps = state.steps ?? [];
+  const runningStepId = [...steps].reverse().find((step) => step.status === "running")?.id;
+  const accentBorder = state.status === "failed" ? "border-red-400/40" : state.status === "running" ? "border-amber-300/30" : "border-stone-800";
+
+  return (
+    <section className={`rounded-2xl border ${accentBorder} bg-stone-900/80 p-4 text-stone-100`}>
+      <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-xs uppercase tracking-[0.3em] text-amber-300">生成过程</p>
-          <h2 className="mt-2 text-lg font-semibold">{process.title}</h2>
+          <h2 className="mt-1.5 text-base font-semibold">{state.title}</h2>
         </div>
-        <span className="rounded-full border border-green-300/40 px-2 py-1 text-xs text-green-200">
-          {process.status === "running" ? "运行中" : "已提交"}
+        <span
+          className={`shrink-0 rounded-full border px-2 py-1 text-[11px] ${
+            state.status === "failed"
+              ? "border-red-300/40 text-red-200"
+              : state.status === "completed"
+                ? "border-green-300/40 text-green-200"
+                : "border-amber-300/40 text-amber-200"
+          }`}
+        >
+          {statusLabels[state.status]}
         </span>
       </div>
 
-      <div className="mt-4 rounded-2xl border border-stone-800 bg-stone-900/80 p-3 text-sm text-stone-300">
-        <p className="text-stone-100">{process.agent}</p>
-        <p className="mt-1 leading-6">{process.description}</p>
-        <p className="mt-2 text-xs text-stone-500">已耗时：{elapsed}</p>
-      </div>
-
-      <ol className="mt-4 space-y-2 text-sm text-stone-300">
-        {steps.map((step, index) => (
-          <li key={`${step}-${index}`} className="flex gap-2">
-            <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-amber-300" />
-            <span>{step}</span>
-          </li>
-        ))}
-      </ol>
-
-      <p className="mt-4 text-xs leading-5 text-stone-500">
-        当前版本展示提交后的关键阶段。若模型接口支持流式输出，可继续扩展为实时词元和原始响应预览。
+      <p className="mt-2 text-[11px] text-stone-500">
+        共 {steps.length} 步 · 总耗时 {elapsedLabel(state.startedAt, state.status === "running" ? undefined : state.updatedAt)}
       </p>
-    </aside>
+
+      {state.error ? (
+        <p className="mt-2 rounded-lg border border-red-400/30 bg-red-950/30 p-2 text-[11px] leading-5 text-red-200">{state.error}</p>
+      ) : state.status === "interrupted" ? (
+        <p className="mt-2 rounded-lg border border-amber-400/30 bg-amber-950/30 p-2 text-[11px] leading-5 text-amber-200">
+          任务超过 2 分钟没有进展，可能是后台进程被中断或模型请求超时。可重新触发本步骤；若反复中断，请检查模型接口与超时配置。
+        </p>
+      ) : null}
+
+      <div className="mt-3 space-y-2">
+        {steps.length === 0 ? (
+          <p className="text-xs text-stone-500">正在准备…</p>
+        ) : (
+          steps.map((step) => <StepCard key={step.id} step={step} defaultOpen={step.id === runningStepId} />)
+        )}
+      </div>
+    </section>
   );
 }
