@@ -282,12 +282,19 @@ export function GenerationProcessPanel({ projectId }: { projectId: string }) {
     }
     setCancelling(true);
     try {
-      await fetch(`/api/projects/${projectId}/runs/${state.runId}/cancel`, { method: "POST" });
-      // 中止后状态由 SSE / 轮询更新为 cancelled；这里不直接改 state。
+      const response = await fetch(`/api/projects/${projectId}/runs/${state.runId}/cancel`, { method: "POST" });
+      const data = (await response.json().catch(() => null)) as { cancelled?: boolean } | null;
+      // 找不到活跃任务（如进程已重启）：信号发不出去，状态不会再变。
+      // 复位按钮并强制拉一次最新状态，避免永远卡在“中止中…”。
+      if (data?.cancelled === false) {
+        setCancelling(false);
+        void findActive();
+      }
+      // 否则中止信号已送达，状态由 SSE / 轮询更新为 cancelled；这里不直接改 state。
     } catch {
       setCancelling(false);
     }
-  }, [projectId, state]);
+  }, [projectId, state, findActive]);
 
   if (!state) {
     return (

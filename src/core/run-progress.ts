@@ -240,7 +240,17 @@ export class RunProgress {
 }
 
 // 活跃 run 注册表：按 runId 持有 RunProgress，供取消 API 查找并请求中止。
-const activeRuns = new Map<string, RunProgress>();
+//
+// 必须挂在 globalThis 上：Next.js App Router 把 Server Action（startJob 经此注册）
+// 与 Route Handler（/cancel 经此查找）编译进不同的模块图，模块级 `const` 在两图中
+// 各自独立。若用普通模块级 Map，cancel 路由查到的是空 Map → requestCancel 永远返回
+// false → 中止信号发不出去，任务停不下来。globalThis 在同一 Node 进程内跨图共享，
+// 保证两侧引用同一个注册表与同一个 RunProgress 实例。
+const globalRegistry = globalThis as typeof globalThis & {
+  __writeflowActiveRuns?: Map<string, RunProgress>;
+};
+const activeRuns: Map<string, RunProgress> =
+  globalRegistry.__writeflowActiveRuns ?? (globalRegistry.__writeflowActiveRuns = new Map());
 
 /** 请求中止指定 run。返回是否找到活跃任务。 */
 export function requestCancel(runId: string): boolean {
