@@ -17,7 +17,7 @@ export const runs = sqliteTable("runs", {
   id: text("id").primaryKey(),
   projectId: text("project_id").notNull().references(() => projects.id),
   workflow: text("workflow").notNull(),
-  status: text("status", { enum: ["draft", "running", "waiting", "completed", "failed"] }).notNull(),
+  status: text("status", { enum: ["draft", "running", "waiting", "completed", "failed", "cancelled"] }).notNull(),
   currentStep: text("current_step").notNull().default("brief"),
   summary: text("summary").notNull().default(""),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
