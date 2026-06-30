@@ -172,6 +172,38 @@ export function GenerationProcessPanel({ projectId }: { projectId: string }) {
     connectRef.current = connect;
   }, [connect]);
 
+  // 轮询兜底：running 期间每 5 秒查一次最新状态。长任务的 SSE 连接可能被中间层
+  // 静默掐断而不触发 onerror，导致“完成”消息丢失、面板卡在运行中；轮询保证终态总会被收到。
+  useEffect(() => {
+    if (state?.status !== "running") {
+      return;
+    }
+    const runId = state.runId;
+    const timer = setInterval(async () => {
+      try {
+        const response = await fetch(`/api/projects/${projectId}/runs/${runId}/state`, { cache: "no-store" });
+        const data = (await response.json()) as { state: (RunState & { status: RunStatus }) | null };
+        const next = data.state;
+        if (next && Array.isArray(next.steps)) {
+          setState(next);
+          if (next.status !== "running") {
+            settledRef.current = next.runId;
+            sourceRef.current?.close();
+            sourceRef.current = null;
+            connectedRunRef.current = null;
+            if (next.status === "completed" && refreshedRef.current !== next.runId) {
+              refreshedRef.current = next.runId;
+              router.refresh();
+            }
+          }
+        }
+      } catch {
+        // 忽略，等待下次轮询
+      }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [state?.status, state?.runId, projectId, router]);
+
   const findActive = useCallback(async () => {
     try {
       const response = await fetch(`/api/projects/${projectId}/active-run`, { cache: "no-store" });
