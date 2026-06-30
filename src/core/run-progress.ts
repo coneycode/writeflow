@@ -8,7 +8,7 @@ import { desc, eq } from "drizzle-orm";
 import { db, schema } from "@/db/client";
 import { projectRoot } from "@/lib/paths";
 
-export type RunKind = "muse" | "architect" | "scribe" | "editor" | "critic" | "final" | "archivist";
+export type RunKind = "muse" | "architect" | "scribe" | "editor" | "critic" | "final" | "archivist" | "autopilot";
 
 export type RunStepStatus = "running" | "completed" | "failed";
 export type RunStatus = "running" | "completed" | "failed" | "interrupted" | "cancelled";

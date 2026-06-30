@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 
 import {
   getProject,
+  listChapterPlanArtifacts,
   listDirectionArtifacts,
   listDraftArtifacts,
   listFinalArtifacts,
@@ -11,8 +12,10 @@ import {
   listSelectedFinalArtifacts,
   readProjectManuscriptContext,
   reviseFromReviewForProject,
+  runAutopilotForProject,
 } from "@/app/actions";
 import { ArchitectPanel } from "@/components/workspace/architect-panel";
+import { AutopilotPanel } from "@/components/workspace/autopilot-panel";
 import { CriticPanel } from "@/components/workspace/critic-panel";
 import { EditorPanel } from "@/components/workspace/editor-panel";
 import { FinalSelectionPanel } from "@/components/workspace/final-selection-panel";
@@ -41,6 +44,7 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
   const reviewArtifacts = await listReviewArtifacts(project.id);
   const selectedFinalArtifacts = await listSelectedFinalArtifacts(project.id);
   const memoryPatchArtifacts = await listMemoryPatchArtifacts(project.id);
+  const chapterPlanArtifacts = await listChapterPlanArtifacts(project.id);
   const manuscriptContext = await readProjectManuscriptContext(project.id);
 
   const contextReady = manuscriptContext.trim().length > 0;
@@ -118,6 +122,13 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
         manuscriptContext={manuscriptContext}
         manuscriptContextSlot={<ManuscriptContextPanel content={manuscriptContext} projectId={project.id} variant="rail" />}
         generationSlot={<GenerationProcessPanel projectId={project.id} />}
+        autopilotSlot={
+          <AutopilotPanel
+            projectId={project.id}
+            chapterPlanArtifacts={chapterPlanArtifacts}
+            runAutopilotAction={runAutopilotForProject}
+          />
+        }
       />
     </WorkspaceShell>
   );

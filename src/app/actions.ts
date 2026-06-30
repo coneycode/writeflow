@@ -15,6 +15,7 @@ import { writeNovelProjectTemplate } from "@/memory/templates";
 import { buildNovelRecallContext } from "@/memory/recall";
 import { createProjectSchema } from "@/schemas/project";
 import type { BeatSheet } from "@/schemas/beat-sheet";
+import type { ChapterPlan, PlannedChapter } from "@/schemas/chapter-plan";
 import type { DirectionOption, DirectionSet } from "@/schemas/direction";
 import { draftSetSchema, draftVariantManuscript, type DraftSegment, type DraftSet, type DraftVariant } from "@/schemas/draft";
 import type { EditedSegment, EditedVariant, EditSet, RevisedVariant } from "@/schemas/edit";
@@ -305,7 +306,7 @@ export async function updateProjectMemoryFile(formData: FormData) {
   revalidatePath(`/projects/${project.id}/memory`);
 }
 
-export async function listProjectArtifacts(projectId: string, kind?: "direction" | "outline" | "draft" | "edit" | "review" | "selected_final" | "memory_patch") {
+export async function listProjectArtifacts(projectId: string, kind?: "direction" | "outline" | "draft" | "edit" | "review" | "selected_final" | "memory_patch" | "chapter_plan") {
   const rows = await db.select().from(schema.artifacts).where(eq(schema.artifacts.projectId, projectId)).orderBy(desc(schema.artifacts.createdAt));
   return kind ? rows.filter((artifact) => artifact.kind === kind) : rows;
 }
@@ -411,6 +412,21 @@ export async function listMemoryPatchArtifacts(projectId: string) {
     artifacts.map(async (artifact) => ({
       artifact,
       data: await readJsonArtifact<MemoryPatch>(project.rootPath, artifact.filePath),
+    })),
+  );
+}
+
+export async function listChapterPlanArtifacts(projectId: string) {
+  const project = await getProject(projectId);
+  if (!project) {
+    return [];
+  }
+
+  const artifacts = await listProjectArtifacts(projectId, "chapter_plan");
+  return Promise.all(
+    artifacts.map(async (artifact) => ({
+      artifact,
+      data: await readJsonArtifact<ChapterPlan>(project.rootPath, artifact.filePath),
     })),
   );
 }
@@ -1705,4 +1721,464 @@ export async function applyMemoryPatchForProject(formData: FormData) {
   await db.update(schema.projects).set({ updatedAt: now }).where(eq(schema.projects.id, project.id));
   revalidatePath(`/projects/${project.id}`);
   revalidatePath(`/projects/${project.id}/memory`);
+}
+
+// ===== 自动续写（Autopilot）：一次输入需求，自动跑完多章 =====
+
+const AUTOPILOT_MAX_REVISIONS = 2;
+const AUTOPILOT_MAX_CHAPTERS = 10;
+
+type ChapterPipelineResult =
+  | { status: "completed"; chapterTitle: string }
+  | { status: "quality_failed"; chapterTitle: string; verdict: string; issues: ReviewIssue[] };
+
+/** 把一份选定终稿变体累计追加进 selected_final（chapters[]），关联到当前后台任务 run。 */
+async function appendSelectedFinalChapter(input: {
+  project: NonNullable<Awaited<ReturnType<typeof getProject>>>;
+  editArtifactId: string;
+  variant: EditedVariant;
+  sourceDraftTitle: string;
+}) {
+  const previousChapters = await latestFinalChapters(input.project);
+  const chapter: FinalChapter = {
+    id: randomUUID(),
+    sourceArtifactId: input.editArtifactId,
+    sourceVariantId: input.variant.id,
+    title: input.variant.title,
+    manuscript: input.variant.manuscript,
+    selectionNote: `Autopilot selected from ${input.sourceDraftTitle}`,
+    createdAt: new Date().toISOString(),
+  };
+  const chapters = [...previousChapters, chapter];
+  const finalManuscript: FinalManuscript = {
+    sourceArtifactId: input.editArtifactId,
+    sourceVariantId: input.variant.id,
+    title: input.variant.title,
+    manuscript: chapters.map((item, index) => `# 第 ${index + 1} 章：${item.title}\n\n${item.manuscript.trim()}`).join("\n\n"),
+    selectionNote: `Autopilot selected from ${input.sourceDraftTitle}`,
+    chapters,
+  };
+
+  await persistJobArtifact({
+    project: input.project,
+    kind: "selected_final",
+    relativeDir: "selected-finals",
+    fileName: `final-${input.variant.id}`,
+    title: `Selected final: ${input.variant.title}`,
+    content: JSON.stringify(finalManuscript, null, 2),
+    stepType: "gate",
+    stepTitle: "Autopilot select final",
+    summary: `Autopilot selected ${input.variant.title}.`,
+    parentArtifactId: input.editArtifactId,
+  });
+
+  return finalManuscript;
+}
+
+/** 自动模式：对一份草稿/润色变体集做审稿；非 pass 则按 issues 修订重审，最多 N 轮。 */
+async function autopilotReviewLoop(input: {
+  project: NonNullable<Awaited<ReturnType<typeof getProject>>>;
+  manuscriptContext: string;
+  recall: string;
+  editSet: EditSet;
+  editArtifactId: string;
+  editParentArtifactId: string | null;
+}) {
+  let editSet = input.editSet;
+  let editArtifactId = input.editArtifactId;
+  // 修订产出的新 edit 的 parent 始终沿用最初 draft，保持章节谱系不断。
+  const editParentArtifactId = input.editParentArtifactId;
+
+  for (let round = 0; round <= AUTOPILOT_MAX_REVISIONS; round += 1) {
+    const candidates = reviewCandidates(editSet);
+    const reviews: VariantReview[] = [];
+    for (const candidate of candidates) {
+      const review = await runCriticVariant({
+        artifactKind: "edit",
+        manuscriptContext: input.manuscriptContext,
+        projectName: input.project.name,
+        recall: input.recall,
+        sourceTitle: editSet.sourceDraftTitle,
+        variant: candidate,
+      });
+      reviews.push(review);
+    }
+
+    const issueRank: Record<ReviewIssue["severity"], number> = { blocker: 3, major: 2, minor: 1 };
+    const allIssues = reviews.flatMap((review) => review.issues).sort((left, right) => issueRank[right.severity] - issueRank[left.severity]);
+    const passingReview = reviews.find((review) => review.verdict === "pass");
+    const verdict = strongestVerdict(reviews);
+    const strongestVariantId = passingReview?.variantId ?? [...reviews].sort((left, right) => left.issues.length - right.issues.length)[0]?.variantId;
+    const criticReview: CriticReview = {
+      verdict,
+      summary: reviews.map((review) => `${review.variantId}: ${review.summary}`).join("\n"),
+      issues: allIssues,
+      strongestVariantId,
+      finalGateRecommendation: "自动模式审稿。优先处理 blocker/major 问题。",
+    };
+
+    await persistJobArtifact({
+      project: input.project,
+      kind: "review",
+      relativeDir: "reviews",
+      fileName: "critic-review",
+      title: `Critic review for ${editSet.sourceDraftTitle}`,
+      content: JSON.stringify(criticReview, null, 2),
+      agentId: "critic",
+      stepTitle: round === 0 ? "Autopilot review" : `Autopilot re-review (round ${round})`,
+      summary: `Autopilot reviewed ${editSet.sourceDraftTitle} (verdict ${verdict}).`,
+      parentArtifactId: editArtifactId,
+    });
+
+    if (verdict === "pass") {
+      const chosen = editSet.variants.find((variant) => variant.id === strongestVariantId) ?? editSet.variants[0];
+      return { ok: true as const, editSet, editArtifactId, chosenVariant: chosen };
+    }
+
+    if (round === AUTOPILOT_MAX_REVISIONS) {
+      return { ok: false as const, verdict, issues: allIssues };
+    }
+
+    // 按 issues 修订：逐变体生成修订版，组装新 EditSet。
+    const revisedVariants: EditedVariant[] = [];
+    for (const variant of editSet.variants) {
+      const variantIssues = issuesForVariant(allIssues, variant.id);
+      if (variantIssues.length === 0) {
+        revisedVariants.push(variant);
+        continue;
+      }
+      const revised: RevisedVariant = await reviseVariantManuscript({
+        manuscriptContext: input.manuscriptContext,
+        projectName: input.project.name,
+        recall: input.recall,
+        variantId: variant.id,
+        variantTitle: variant.title,
+        manuscript: variant.manuscript,
+        issues: variantIssues,
+      });
+      revisedVariants.push({
+        id: variant.id,
+        sourceVariantId: variant.sourceVariantId,
+        title: variant.title.includes("（修订版）") ? variant.title : `${variant.title}（修订版）`,
+        editStrategy: `自动修订：针对 ${variantIssues.length} 个问题修复。`,
+        changesMade: revised.changesMade,
+        remainingConcerns: revised.remainingConcerns,
+        manuscript: revised.manuscript,
+      });
+    }
+
+    editSet = {
+      sourceDraftTitle: editSet.sourceDraftTitle,
+      variants: revisedVariants,
+      editorNotes: [`自动修订第 ${round + 1} 轮。`],
+    };
+    editArtifactId = await persistJobArtifact({
+      project: input.project,
+      kind: "edit",
+      relativeDir: "finals",
+      fileName: "revised-drafts",
+      title: `Autopilot revised drafts for ${editSet.sourceDraftTitle}`,
+      content: JSON.stringify(editSet, null, 2),
+      agentId: "editor",
+      stepTitle: `Autopilot revise (round ${round + 1})`,
+      summary: `Autopilot revised ${editSet.sourceDraftTitle}.`,
+      parentArtifactId: editParentArtifactId ?? undefined,
+    });
+  }
+
+  // 理论上不可达（循环内已 return）。
+  return { ok: false as const, verdict: "revise", issues: [] as ReviewIssue[] };
+}
+
+/** 自动模式下完整跑一章：构思→大纲→写作→润色→审稿循环→选终稿→归档并自动应用记忆。 */
+async function runChapterPipeline(input: {
+  project: NonNullable<Awaited<ReturnType<typeof getProject>>>;
+  planned: PlannedChapter;
+  chapterTotal: number;
+}): Promise<ChapterPipelineResult> {
+  const { project, planned } = input;
+  const tag = `第 ${planned.index}/${input.chapterTotal} 章`;
+  const chapterBrief = [planned.title, planned.brief, ...(planned.focus ?? [])].filter(Boolean).join("\n");
+
+  // 每章都重新读取上文（含已成章全文）与记忆（前章已自动写回）。
+  const manuscriptContext = await requireProjectManuscriptContext(project);
+  const recall = await buildNovelRecallContext(project.rootPath);
+
+  // 1. 构思方向（自动采纳推荐）。
+  const directionPrompt = `Project: ${project.name}
+
+续写上文（所有方向必须从这段上文的末尾自然延展，不得跳过当前场面）:
+${manuscriptContextExcerpt(manuscriptContext)}
+
+User brief:
+${chapterBrief}
+
+Project memory:
+${recallExcerpt(recall)}
+
+Return three options unless the brief asks otherwise.`;
+  const directionSet = await runAgent({ agent: agents.muse, prompt: directionPrompt, maxTokens: 2200, label: `${tag}·构思方向` });
+  const directionArtifactId = await persistJobArtifact({
+    project,
+    kind: "direction",
+    relativeDir: "directions",
+    fileName: "muse-directions",
+    title: `Muse direction options (${tag})`,
+    content: JSON.stringify({ ...directionSet, brief: chapterBrief }, null, 2),
+    agentId: "muse",
+    stepTitle: `${tag} directions`,
+    summary: `Autopilot generated directions for ${tag}.`,
+  });
+  // 自动选路：优先采纳 recommendation 指向的 option，否则取第一个。
+  const recommended = directionSet.options.find((option) => directionSet.recommendation.includes(option.id) || directionSet.recommendation.includes(option.title));
+  const selectedOption: DirectionOption = recommended ?? directionSet.options[0];
+
+  // 2. 章节大纲。
+  const outlinePrompt = `Project: ${project.name}
+
+续写上文（章节大纲第一场必须承接这段上文的最后状态、地点、人物动作和情绪）:
+${manuscriptContextExcerpt(manuscriptContext)}
+
+Selected direction:
+${JSON.stringify(selectedOption, null, 2)}
+
+Full Muse recommendation:
+${directionSet.recommendation}
+
+Project memory:
+${recallExcerpt(recall)}
+
+Create a chapter beat sheet for this selected direction.`;
+  const beatSheet = await runAgent({ agent: agents.architect, prompt: outlinePrompt, maxTokens: 2600, label: `${tag}·生成大纲` });
+  const outlineArtifactId = await persistJobArtifact({
+    project,
+    kind: "outline",
+    relativeDir: "outlines",
+    fileName: `outline-${selectedOption.id}`,
+    title: `Architect outline (${tag})`,
+    content: JSON.stringify(beatSheet, null, 2),
+    agentId: "architect",
+    stepTitle: `${tag} outline`,
+    summary: `Autopilot generated outline for ${tag}.`,
+    parentArtifactId: directionArtifactId,
+  });
+
+  // 3. 分段写作（A/B 两个变体）。
+  const variantRequests = [
+    { id: "A" as const, strategy: "紧凑推进：强调悬念、行动压力和场景钩子。" },
+    { id: "B" as const, strategy: "情绪压迫：强调人物感受、关系张力和细节余波。" },
+  ];
+  const draftVariants: DraftVariant[] = [];
+  for (const request of variantRequests) {
+    draftVariants.push(
+      await runScribeVariant({
+        beatSheet,
+        manuscriptContext,
+        projectName: project.name,
+        recall,
+        variantId: request.id,
+        variantStrategy: request.strategy,
+      }),
+    );
+  }
+  const draftSet: DraftSet = {
+    outlineTitle: beatSheet.chapterTitle,
+    variants: draftVariants,
+    notesForEditor: ["自动模式按变体生成草稿。"],
+  };
+  const draftArtifactId = await persistJobArtifact({
+    project,
+    kind: "draft",
+    relativeDir: "drafts",
+    fileName: "scribe-drafts",
+    title: `Scribe drafts (${tag})`,
+    content: JSON.stringify(draftSet, null, 2),
+    agentId: "scribe",
+    stepTitle: `${tag} drafts`,
+    summary: `Autopilot generated drafts for ${tag}.`,
+    parentArtifactId: outlineArtifactId,
+  });
+
+  // 4. 逐场润色，组装 EditSet。
+  const editedVariants: EditedVariant[] = [];
+  for (const variant of draftSet.variants) {
+    const editedSegments: EditedSegment[] = [];
+    const sceneTotal = variant.segments.length;
+    for (const [segmentIndex, segment] of variant.segments.entries()) {
+      const previousContext = editedSegments.map((item) => item.manuscript).join("\n\n");
+      const nextSegment = variant.segments[segmentIndex + 1];
+      const editedSegment = await runEditorSegment({
+        draftSetTitle: draftSet.outlineTitle,
+        manuscriptContext,
+        nextSceneHint: nextSegment ? `${nextSegment.sceneId}: ${nextSegment.sceneTitle} — ${nextSegment.manuscript.slice(0, 500)}` : undefined,
+        previousContext,
+        projectName: project.name,
+        recall,
+        segment,
+        variant,
+        label: `${tag}·润色 变体 ${variant.id} · 第 ${segmentIndex + 1} 场 / 共 ${sceneTotal} 场`,
+      });
+      editedSegments.push(editedSegment);
+    }
+    editedVariants.push({
+      id: `${variant.id}-edited`,
+      sourceVariantId: variant.id,
+      title: `${variant.title}（润色版）`,
+      editStrategy: `按场景分段润色，保持“${variant.strategy}”的变体策略。`,
+      changesMade: editedSegments.flatMap((segment) => segment.changesMade.map((change) => `${segment.sceneId}: ${change}`)),
+      remainingConcerns: editedSegments.flatMap((segment) => segment.remainingConcerns.map((concern) => `${segment.sceneId}: ${concern}`)),
+      manuscript: editedSegments.map((segment) => segment.manuscript.trim()).filter(Boolean).join("\n\n"),
+    });
+  }
+  const editSet: EditSet = {
+    sourceDraftTitle: draftSet.outlineTitle,
+    variants: editedVariants,
+    editorNotes: ["自动模式按场景分段润色。"],
+  };
+  const editArtifactId = await persistJobArtifact({
+    project,
+    kind: "edit",
+    relativeDir: "finals",
+    fileName: "editor-polished-drafts",
+    title: `Editor polished drafts (${tag})`,
+    content: JSON.stringify(editSet, null, 2),
+    agentId: "editor",
+    stepTitle: `${tag} polish`,
+    summary: `Autopilot polished ${tag}.`,
+    parentArtifactId: draftArtifactId,
+  });
+
+  // 5. 审稿循环（非 pass 自动修订重审，最多 N 轮）。
+  const reviewed = await autopilotReviewLoop({
+    project,
+    manuscriptContext,
+    recall,
+    editSet,
+    editArtifactId,
+    editParentArtifactId: draftArtifactId,
+  });
+  if (!reviewed.ok) {
+    return { status: "quality_failed", chapterTitle: beatSheet.chapterTitle, verdict: reviewed.verdict, issues: reviewed.issues };
+  }
+
+  // 6. 选定终稿，累计进全文。
+  const finalManuscript = await appendSelectedFinalChapter({
+    project,
+    editArtifactId: reviewed.editArtifactId,
+    variant: reviewed.chosenVariant,
+    sourceDraftTitle: reviewed.editSet.sourceDraftTitle,
+  });
+
+  // 7. 归档：生成记忆补丁并【自动应用】（多章连跑，让后章看到前章新设定）。
+  const digest = await runFinalDigest({ finalManuscript, projectName: project.name });
+  const memoryPrompt = `Project: ${project.name}
+
+前情（续写上文末尾，属于本章之前【已成立】的背景，不要当作本章新增内容）:
+${manuscriptContextExcerpt(manuscriptContext) || "（无前情）"}
+
+Selected final manuscript summary:
+${JSON.stringify(digest, null, 2)}
+
+Current project memory excerpt:
+${recallExcerpt(recall)}
+
+Generate a conservative memory patch proposal. Only propose genuinely new or changed facts.`;
+  const patch = await runAgent({ agent: agents.archivist, prompt: memoryPrompt, maxTokens: 2400, label: `${tag}·生成记忆补丁` });
+  await persistJobArtifact({
+    project,
+    kind: "memory_patch",
+    relativeDir: "memory-patches",
+    fileName: "archivist-memory-patch",
+    title: `Memory patch (${tag})`,
+    content: JSON.stringify(patch, null, 2),
+    agentId: "archivist",
+    stepTitle: `${tag} memory patch`,
+    summary: `Autopilot generated memory patch for ${tag}.`,
+  });
+  // 自动应用（仅多章连跑期间）。
+  for (const change of patch.changes) {
+    await applyMemoryPatchChange(project.rootPath, change);
+  }
+
+  return { status: "completed", chapterTitle: beatSheet.chapterTitle };
+}
+
+export async function runAutopilotForProject(formData: FormData) {
+  "use server";
+
+  const projectId = String(formData.get("projectId") ?? "");
+  const overallGoal = String(formData.get("overallGoal") ?? "").trim();
+  const chapterCountRaw = Number(formData.get("chapterCount") ?? 0);
+  const perChapterBriefs = String(formData.get("perChapterBriefs") ?? "")
+    .split("\n")
+    .map((line) => line.trim());
+  const project = await getProject(projectId);
+
+  if (!project) {
+    throw new Error("Project not found.");
+  }
+  if (!overallGoal) {
+    throw new Error("请填写整体目标。");
+  }
+  const chapterCount = Math.min(Math.max(Math.floor(chapterCountRaw) || 1, 1), AUTOPILOT_MAX_CHAPTERS);
+
+  await requireProjectManuscriptContext(project);
+
+  await startJob({
+    projectId: project.id,
+    kind: "autopilot",
+    title: `自动续写 ${chapterCount} 章`,
+    executor: async () => {
+      const manuscriptContext = await requireProjectManuscriptContext(project);
+      const recall = await buildNovelRecallContext(project.rootPath);
+
+      // 1. 拆章规划（显式产物）。
+      const perChapterLines = perChapterBriefs
+        .map((brief, index) => (brief ? `第 ${index + 1} 章要点：${brief}` : `第 ${index + 1} 章：未指定（按整体目标自行编排）`))
+        .slice(0, chapterCount)
+        .join("\n");
+      const planPrompt = `Project: ${project.name}
+
+续写上文末尾:
+${manuscriptContextExcerpt(manuscriptContext)}
+
+整体目标:
+${overallGoal}
+
+需要规划的章节数：${chapterCount}
+
+逐章要点（有则必须遵循，无则按整体目标自行编排）:
+${perChapterLines}
+
+Project memory:
+${recallExcerpt(recall)}
+
+Break this into exactly ${chapterCount} chapter plans.`;
+      const plan: ChapterPlan = await runAgent({ agent: agents.chapterPlanner, prompt: planPrompt, maxTokens: 2600, label: "拆解章节规划" });
+      await persistJobArtifact({
+        project,
+        kind: "chapter_plan",
+        relativeDir: "chapter-plans",
+        fileName: "autopilot-chapter-plan",
+        title: `Autopilot chapter plan (${plan.chapters.length} chapters)`,
+        content: JSON.stringify(plan, null, 2),
+        stepType: "system",
+        stepTitle: "Chapter plan",
+        summary: `Autopilot planned ${plan.chapters.length} chapters.`,
+      });
+
+      // 2. 逐章跑流水线。
+      const planned = plan.chapters.slice(0, chapterCount);
+      for (const chapter of planned) {
+        if (currentProgress()?.isCancelled) {
+          return;
+        }
+        const result = await runChapterPipeline({ project, planned: chapter, chapterTotal: planned.length });
+        if (result.status === "quality_failed") {
+          const blockers = result.issues.filter((issue) => issue.severity !== "minor").slice(0, 8).map((issue) => `- [${issue.severity}] ${issue.problem}`).join("\n");
+          throw new Error(`在「${result.chapterTitle}」质量未达标（审稿 ${result.verdict}），已停止并保留此前已成章。未消解的主要问题：\n${blockers}`);
+        }
+      }
+    },
+  });
 }

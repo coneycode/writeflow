@@ -29,6 +29,7 @@ export function WorkspaceLayout({
   manuscriptContext,
   manuscriptContextSlot,
   generationSlot,
+  autopilotSlot,
 }: {
   projectId: string;
   stages: StageStatus[];
@@ -37,6 +38,7 @@ export function WorkspaceLayout({
   manuscriptContext: string;
   manuscriptContextSlot: React.ReactNode;
   generationSlot: React.ReactNode;
+  autopilotSlot?: React.ReactNode;
 }) {
   const [activeStage, setActiveStage] = useState<StageKey>(() => defaultActiveStage(stages));
 
@@ -44,7 +46,18 @@ export function WorkspaceLayout({
   const activeStatus = stages.find((stage) => stage.key === activeStage);
 
   return (
-    <section className="grid min-h-[680px] gap-4 lg:grid-cols-[280px_minmax(0,1fr)_320px]">
+    <div className="space-y-4">
+      {autopilotSlot ? (
+        <details className="rounded-3xl border border-stone-800 bg-stone-900/70 p-2">
+          <summary className="cursor-pointer rounded-2xl px-4 py-3 text-sm font-medium text-stone-200">
+            <span className="text-amber-300">⚡ 自动续写</span>
+            <span className="ml-2 text-xs text-stone-500">一次输入需求，自动跑完多章交付终稿（展开）</span>
+          </summary>
+          <div className="p-2">{autopilotSlot}</div>
+        </details>
+      ) : null}
+
+      <section className="grid min-h-[680px] gap-4 lg:grid-cols-[280px_minmax(0,1fr)_320px]">
       <StageRail stages={stages} activeStage={activeStage} onSelect={setActiveStage} />
 
       <section className="flex min-w-0 flex-col overflow-hidden rounded-3xl border border-stone-200 bg-doc-surface shadow-xl shadow-black/30">
@@ -59,13 +72,14 @@ export function WorkspaceLayout({
         <div className="min-h-0 flex-1 overflow-auto px-6 py-6 text-doc-text">{active?.content}</div>
       </section>
 
-      <ContextRail
-        projectId={projectId}
-        chapters={chapters}
-        manuscriptContext={manuscriptContext}
-        manuscriptContextSlot={manuscriptContextSlot}
-        generationSlot={generationSlot}
-      />
-    </section>
+        <ContextRail
+          projectId={projectId}
+          chapters={chapters}
+          manuscriptContext={manuscriptContext}
+          manuscriptContextSlot={manuscriptContextSlot}
+          generationSlot={generationSlot}
+        />
+      </section>
+    </div>
   );
 }
