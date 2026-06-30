@@ -14,6 +14,8 @@ export const directionOptionSchema = z.object({
 export const directionSetSchema = z.object({
   options: z.array(directionOptionSchema).min(1),
   recommendation: z.string(),
+  /** 触发本次构思时用户输入的说明（构思记录）。旧产物可能没有此字段。 */
+  brief: z.string().optional(),
 });
 
 export type DirectionOption = z.infer<typeof directionOptionSchema>;

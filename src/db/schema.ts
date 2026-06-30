@@ -40,6 +40,8 @@ export const artifacts = sqliteTable("artifacts", {
   id: text("id").primaryKey(),
   projectId: text("project_id").notNull().references(() => projects.id),
   runId: text("run_id").references(() => runs.id),
+  // 上游 artifact 的 id，用于按章节回溯谱系（direction→outline→draft→edit；review→被审对象）。
+  parentArtifactId: text("parent_artifact_id"),
   kind: text("kind", { enum: ["brief", "recall", "direction", "outline", "draft", "edit", "review", "selected_final", "memory_patch"] }).notNull(),
   title: text("title").notNull(),
   filePath: text("file_path").notNull(),

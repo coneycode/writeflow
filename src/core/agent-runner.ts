@@ -2,6 +2,7 @@ import type { z } from "zod";
 
 import type { AgentDefinition } from "@/schemas/agent";
 import { OpenAICompatibleProvider } from "@/providers/openai-compatible";
+import { currentProgress } from "@/core/run-progress";
 
 export function extractJsonObject(text: string) {
   const trimmed = text.trim();
@@ -27,15 +28,36 @@ export async function runAgent<TSchema extends z.ZodType>(input: {
   agent: AgentDefinition<TSchema>;
   prompt: string;
   maxTokens?: number;
+  /** 子步骤标签，如 "变体 A · 第 2 场 / 共 5 场"。 */
+  label?: string;
 }) {
   const provider = new OpenAICompatibleProvider();
-  const raw = await provider.generateText({
-    system: input.agent.systemPrompt,
-    prompt: input.prompt,
-    temperature: input.agent.temperature,
-    maxTokens: input.maxTokens,
+  const progress = currentProgress();
+  const stepId = progress?.startStep({
+    agent: input.agent.name,
+    label: input.label ?? input.agent.name,
+    promptPreview: input.prompt,
   });
 
-  const parsed = JSON.parse(extractJsonObject(raw));
-  return input.agent.outputSchema.parse(parsed) as z.infer<TSchema>;
+  try {
+    const raw = await provider.generateText({
+      system: input.agent.systemPrompt,
+      prompt: input.prompt,
+      temperature: input.agent.temperature,
+      maxTokens: input.maxTokens,
+      onToken: stepId ? (token) => progress?.appendToken(stepId, token) : undefined,
+    });
+
+    const parsed = JSON.parse(extractJsonObject(raw));
+    const result = input.agent.outputSchema.parse(parsed) as z.infer<TSchema>;
+    if (stepId) {
+      progress?.endStep(stepId, "completed");
+    }
+    return result;
+  } catch (error) {
+    if (stepId) {
+      progress?.endStep(stepId, "failed");
+    }
+    throw error;
+  }
 }

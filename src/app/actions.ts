@@ -8,17 +8,19 @@ import path from "node:path";
 import { db, schema } from "@/db/client";
 import { agents } from "@/agents/registry";
 import { runAgent } from "@/core/agent-runner";
+import { currentProgress, startJob } from "@/core/run-progress";
 import { overwriteArtifact, readJsonArtifact, writeArtifact } from "@/core/artifact-store";
 import { ensureDirectory, projectRoot, slugifyProjectName } from "@/lib/paths";
 import { writeNovelProjectTemplate } from "@/memory/templates";
 import { buildNovelRecallContext } from "@/memory/recall";
 import { createProjectSchema } from "@/schemas/project";
 import type { BeatSheet } from "@/schemas/beat-sheet";
-import type { DirectionSet } from "@/schemas/direction";
-import { draftSetSchema, type DraftSegment, type DraftSet, type DraftVariant } from "@/schemas/draft";
-import type { EditedSegment, EditedVariant, EditSet } from "@/schemas/edit";
+import type { DirectionOption, DirectionSet } from "@/schemas/direction";
+import { draftSetSchema, draftVariantManuscript, type DraftSegment, type DraftSet, type DraftVariant } from "@/schemas/draft";
+import type { EditedSegment, EditedVariant, EditSet, RevisedVariant } from "@/schemas/edit";
 import type { CriticReview, ReviewIssue, VariantReview } from "@/schemas/review";
-import type { FinalManuscript } from "@/schemas/final-manuscript";
+import { finalChapters } from "@/schemas/final-manuscript";
+import type { FinalChapter, FinalManuscript } from "@/schemas/final-manuscript";
 import type { FinalManuscriptDigest, MemoryPatch } from "@/schemas/memory-patch";
 
 
@@ -117,6 +119,59 @@ async function recordWorkflowRun(input: WorkflowRunInput) {
   return runId;
 }
 
+/**
+ * 把生成产物写入磁盘，并关联到当前后台任务的 run。
+ * 在 startJob 的 executor 内调用：run 行已由 startJob 建好，
+ * 这里只补 run_steps 记录与 artifact 行，并标记项目更新时间。
+ */
+async function persistJobArtifact(input: {
+  project: NonNullable<Awaited<ReturnType<typeof getProject>>>;
+  kind: typeof schema.artifacts.$inferInsert.kind;
+  relativeDir: string;
+  fileName: string;
+  title: string;
+  content: string;
+  agentId?: string;
+  stepType?: "agent" | "gate" | "system";
+  stepTitle: string;
+  summary: string;
+  parentArtifactId?: string;
+}) {
+  const progress = currentProgress();
+  const runId = progress?.runId;
+  const now = new Date();
+  const filePath = await writeArtifact(input.project.rootPath, input.relativeDir, input.fileName, input.content);
+  const artifactId = randomUUID();
+
+  if (runId) {
+    await db.insert(schema.runSteps).values({
+      id: randomUUID(),
+      runId,
+      agentId: input.agentId,
+      stepType: input.stepType ?? "agent",
+      title: input.stepTitle,
+      status: "completed",
+      artifactId,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  await db.insert(schema.artifacts).values({
+    id: artifactId,
+    projectId: input.project.id,
+    runId: runId ?? null,
+    parentArtifactId: input.parentArtifactId ?? null,
+    kind: input.kind,
+    title: input.title,
+    filePath,
+    createdAt: now,
+  });
+
+  await db.update(schema.projects).set({ updatedAt: now }).where(eq(schema.projects.id, input.project.id));
+  return artifactId;
+}
+
 export async function listProjects() {
   return db.select().from(schema.projects).orderBy(desc(schema.projects.updatedAt));
 }
@@ -158,8 +213,53 @@ export async function readProjectManuscriptContext(projectId: string) {
   }
 }
 
+function combineManuscriptContext(input: { chapters: FinalChapter[]; originalContext: string }) {
+  return [
+    input.originalContext.trim(),
+    input.chapters
+      .map((chapter, index) => `# 第 ${index + 1} 章：${chapter.title}\n\n${chapter.manuscript.trim()}`)
+      .filter(Boolean)
+      .join("\n\n"),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+async function latestFinalChapters(project: NonNullable<Awaited<ReturnType<typeof getProject>>>) {
+  const artifacts = await listProjectArtifacts(project.id, "selected_final");
+  const [latestArtifact] = artifacts;
+  if (!latestArtifact) {
+    return [];
+  }
+
+  const finalManuscript = await readJsonArtifact<FinalManuscript>(project.rootPath, latestArtifact.filePath);
+  if (!finalManuscript) {
+    return [];
+  }
+
+  return finalManuscript.chapters?.length
+    ? finalManuscript.chapters
+    : [
+        {
+          id: `${finalManuscript.sourceArtifactId}-${finalManuscript.sourceVariantId}`,
+          sourceArtifactId: finalManuscript.sourceArtifactId,
+          sourceVariantId: finalManuscript.sourceVariantId,
+          title: finalManuscript.title,
+          manuscript: finalManuscript.manuscript,
+          selectionNote: finalManuscript.selectionNote,
+          createdAt: "",
+        },
+      ];
+}
+
+async function readProjectFullManuscriptContext(project: NonNullable<Awaited<ReturnType<typeof getProject>>>) {
+  const originalContext = await readProjectManuscriptContext(project.id);
+  const chapters = await latestFinalChapters(project);
+  return combineManuscriptContext({ chapters, originalContext });
+}
+
 async function requireProjectManuscriptContext(project: NonNullable<Awaited<ReturnType<typeof getProject>>>) {
-  const content = (await readProjectManuscriptContext(project.id)).trim();
+  const content = (await readProjectFullManuscriptContext(project)).trim();
   if (!content) {
     throw new Error("续写必须基于上文。请先在工作台的“续写上文”区域粘贴并保存文章上文。");
   }
@@ -315,6 +415,102 @@ export async function listMemoryPatchArtifacts(projectId: string) {
   );
 }
 
+type ArtifactRow = typeof schema.artifacts.$inferSelect;
+
+export type ChapterArchiveReview = {
+  title: string;
+  data: CriticReview | null;
+};
+
+export type ChapterArchive = {
+  index: number;
+  chapterId: string;
+  title: string;
+  selectionNote: string;
+  manuscript: string;
+  direction: { option: DirectionOption | null; recommendation: string } | null;
+  outline: BeatSheet | null;
+  draft: DraftSet | null;
+  edit: EditSet | null;
+  reviews: ChapterArchiveReview[];
+};
+
+async function getArtifactById(projectId: string, artifactId: string): Promise<ArtifactRow | null> {
+  const [row] = await db.select().from(schema.artifacts).where(eq(schema.artifacts.id, artifactId));
+  return row && row.projectId === projectId ? row : null;
+}
+
+/**
+ * 装配每章的完整谱系：以该章终稿锚定的 edit artifact 为起点，
+ * 沿 parentArtifactId 回溯 edit → draft → outline → direction，
+ * 并收集 parent 指向 edit/draft 的审稿记录。旧数据缺父链时各阶段为 null。
+ */
+export async function getChapterArchive(projectId: string): Promise<ChapterArchive[]> {
+  const project = await getProject(projectId);
+  if (!project) {
+    return [];
+  }
+
+  const selectedFinals = await listProjectArtifacts(projectId, "selected_final");
+  const [latest] = selectedFinals;
+  if (!latest) {
+    return [];
+  }
+
+  const finalManuscript = await readJsonArtifact<FinalManuscript>(project.rootPath, latest.filePath);
+  if (!finalManuscript) {
+    return [];
+  }
+
+  const chapters = finalChapters(finalManuscript);
+  const reviewArtifacts = await listProjectArtifacts(projectId, "review");
+
+  return Promise.all(
+    chapters.map(async (chapter, index): Promise<ChapterArchive> => {
+      const editArtifact = chapter.sourceArtifactId ? await getArtifactById(projectId, chapter.sourceArtifactId) : null;
+      const edit = editArtifact ? await readJsonArtifact<EditSet>(project.rootPath, editArtifact.filePath) : null;
+
+      const draftArtifact = editArtifact?.parentArtifactId ? await getArtifactById(projectId, editArtifact.parentArtifactId) : null;
+      const draft = draftArtifact ? await readJsonArtifact<DraftSet>(project.rootPath, draftArtifact.filePath) : null;
+
+      const outlineArtifact = draftArtifact?.parentArtifactId ? await getArtifactById(projectId, draftArtifact.parentArtifactId) : null;
+      const outline = outlineArtifact ? await readJsonArtifact<BeatSheet>(project.rootPath, outlineArtifact.filePath) : null;
+
+      const directionArtifact = outlineArtifact?.parentArtifactId ? await getArtifactById(projectId, outlineArtifact.parentArtifactId) : null;
+      const directionSet = directionArtifact ? await readJsonArtifact<DirectionSet>(project.rootPath, directionArtifact.filePath) : null;
+      const direction = directionSet
+        ? {
+            option: outline ? directionSet.options.find((option) => option.title === outline.selectedDirection || outline.selectedDirection.includes(option.title)) ?? null : null,
+            recommendation: directionSet.recommendation,
+          }
+        : null;
+
+      const relatedIds = new Set([editArtifact?.id, draftArtifact?.id].filter(Boolean) as string[]);
+      const reviews = await Promise.all(
+        reviewArtifacts
+          .filter((artifact) => artifact.parentArtifactId && relatedIds.has(artifact.parentArtifactId))
+          .map(async (artifact) => ({
+            title: artifact.title,
+            data: await readJsonArtifact<CriticReview>(project.rootPath, artifact.filePath),
+          })),
+      );
+
+      return {
+        index: index + 1,
+        chapterId: chapter.id,
+        title: chapter.title,
+        selectionNote: chapter.selectionNote,
+        manuscript: chapter.manuscript,
+        direction,
+        outline,
+        draft,
+        edit,
+        reviews,
+      };
+    }),
+  );
+}
+
 export async function createProject(formData: FormData) {
   "use server";
 
@@ -361,9 +557,17 @@ export async function runMuseForProject(formData: FormData) {
     throw new Error("Project not found.");
   }
 
-  const manuscriptContext = await requireProjectManuscriptContext(project);
-  const recall = await buildNovelRecallContext(project.rootPath);
-  const prompt = `Project: ${project.name}
+  // 同步校验上文存在，错误立即反馈到按钮；模型工作进入后台任务。
+  await requireProjectManuscriptContext(project);
+
+  await startJob({
+    projectId: project.id,
+    kind: "muse",
+    title: "生成续写方向",
+    executor: async () => {
+      const manuscriptContext = await requireProjectManuscriptContext(project);
+      const recall = await buildNovelRecallContext(project.rootPath);
+      const prompt = `Project: ${project.name}
 
 续写上文（所有方向必须从这段上文的末尾自然延展，不得跳过当前场面）:
 ${manuscriptContextExcerpt(manuscriptContext)}
@@ -375,34 +579,23 @@ Project memory:
 ${recallExcerpt(recall)}
 
 Return three options unless the brief asks otherwise.`;
-  const result = await runAgent({ agent: agents.muse, prompt, maxTokens: 2200 });
-  const now = new Date();
-  const filePath = await writeArtifact(project.rootPath, "directions", "muse-directions", JSON.stringify(result, null, 2));
-  const artifactId = randomUUID();
-  const runId = await recordWorkflowRun({
-    agentId: "muse",
-    artifactId,
-    currentStep: "directions",
-    projectId: project.id,
-    stepType: "agent",
-    summary: "Muse generated story direction options.",
-    title: "Generate Muse directions",
+      const result = await runAgent({ agent: agents.muse, prompt, maxTokens: 2200, label: "构思续写方向" });
+      // 保存本次构思说明，作为可回看的构思记录。
+      const directionSet = { ...result, brief };
+
+      await persistJobArtifact({
+        project,
+        kind: "direction",
+        relativeDir: "directions",
+        fileName: "muse-directions",
+        title: "Muse direction options",
+        content: JSON.stringify(directionSet, null, 2),
+        agentId: "muse",
+        stepTitle: "Generate Muse directions",
+        summary: "Muse generated story direction options.",
+      });
+    },
   });
-
-  await db.insert(schema.artifacts).values({
-    id: artifactId,
-    projectId: project.id,
-    runId,
-    kind: "direction",
-    title: "Muse direction options",
-    filePath,
-    createdAt: now,
-  });
-
-  await db.update(schema.projects).set({ updatedAt: now }).where(eq(schema.projects.id, project.id));
-
-  revalidatePath(`/projects/${project.id}`);
-  revalidatePath(`/projects/${project.id}/runs`);
 }
 
 export async function updateOutlineArtifact(formData: FormData) {
@@ -458,6 +651,7 @@ async function runScribeSegment(input: {
   scene: BeatSheet["scenes"][number];
   variantId: "A" | "B";
   variantStrategy: string;
+  label?: string;
 }) {
   const prompt = `Project: ${input.projectName}
 
@@ -488,7 +682,7 @@ ${recallExcerpt(input.recall)}
 
 Write only the current scene segment. Keep sceneId and sceneTitle exactly aligned to the beat sheet.`;
 
-  return runAgent({ agent: agents.scribeSegment, prompt, maxTokens: 2600 });
+  return runAgent({ agent: agents.scribeSegment, prompt, maxTokens: 2600, label: input.label });
 }
 
 async function runScribeVariant(input: {
@@ -500,6 +694,7 @@ async function runScribeVariant(input: {
   variantStrategy: string;
 }) {
   const segments: DraftSegment[] = [];
+  const sceneTotal = input.beatSheet.scenes.length;
 
   for (const [sceneIndex, scene] of input.beatSheet.scenes.entries()) {
     const previousContext = segments.map((segment) => segment.manuscript).join("\n\n");
@@ -514,6 +709,7 @@ async function runScribeVariant(input: {
       scene,
       variantId: input.variantId,
       variantStrategy: input.variantStrategy,
+      label: `变体 ${input.variantId} · 第 ${sceneIndex + 1} 场 / 共 ${sceneTotal} 场：${scene.title}`,
     });
     segments.push(segment);
   }
@@ -553,79 +749,53 @@ export async function runScribeForProject(formData: FormData) {
     throw new Error("Unable to read outline artifact.");
   }
 
-  const manuscriptContext = await requireProjectManuscriptContext(project);
-  const recall = await buildNovelRecallContext(project.rootPath);
-  const variantRequests = [
-    { id: "A" as const, strategy: "紧凑推进：强调悬念、行动压力和场景钩子。" },
-    { id: "B" as const, strategy: "情绪压迫：强调人物感受、关系张力和细节余波。" },
-  ];
-  const variants: DraftVariant[] = [];
+  await requireProjectManuscriptContext(project);
 
-  for (const variantRequest of variantRequests) {
-    try {
-      const variant = await runScribeVariant({
-        beatSheet,
-        manuscriptContext,
-        projectName: project.name,
-        recall,
-        variantId: variantRequest.id,
-        variantStrategy: variantRequest.strategy,
-      });
-      variants.push(variant);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error("Scribe variant agent failed", {
-        errorName: error instanceof Error ? error.name : "UnknownError",
-        message,
-        maxTokens: 3600,
-        variantId: variantRequest.id,
-      });
-      await recordWorkflowRun({
+  await startJob({
+    projectId: project.id,
+    kind: "scribe",
+    title: "生成分段正文",
+    executor: async () => {
+      const manuscriptContext = await requireProjectManuscriptContext(project);
+      const recall = await buildNovelRecallContext(project.rootPath);
+      const variantRequests = [
+        { id: "A" as const, strategy: "紧凑推进：强调悬念、行动压力和场景钩子。" },
+        { id: "B" as const, strategy: "情绪压迫：强调人物感受、关系张力和细节余波。" },
+      ];
+      const variants: DraftVariant[] = [];
+
+      for (const variantRequest of variantRequests) {
+        const variant = await runScribeVariant({
+          beatSheet,
+          manuscriptContext,
+          projectName: project.name,
+          recall,
+          variantId: variantRequest.id,
+          variantStrategy: variantRequest.strategy,
+        });
+        variants.push(variant);
+      }
+
+      const result: DraftSet = {
+        outlineTitle: beatSheet.chapterTitle,
+        variants,
+        notesForEditor: ["草稿已按变体拆分生成，以降低长正文请求超时风险。请重点检查两版之间的节奏差异和场景连续性。"],
+      };
+
+      await persistJobArtifact({
+        project,
+        kind: "draft",
+        relativeDir: "drafts",
+        fileName: "scribe-drafts",
+        title: `Scribe drafts for ${beatSheet.chapterTitle}`,
+        content: JSON.stringify(result, null, 2),
         agentId: "scribe",
-        currentStep: "drafting",
-        projectId: project.id,
-        status: "failed",
-        stepType: "agent",
-        summary: `Scribe failed for ${beatSheet.chapterTitle} variant ${variantRequest.id}: ${message.slice(0, 160)}`,
-        title: "Generate Scribe draft variant",
+        stepTitle: "Generate Scribe draft variants",
+        summary: `Scribe generated draft variants for ${beatSheet.chapterTitle}.`,
+        parentArtifactId: outlineArtifact.id,
       });
-      throw error;
-    }
-  }
-
-  const result: DraftSet = {
-    outlineTitle: beatSheet.chapterTitle,
-    variants,
-    notesForEditor: ["草稿已按变体拆分生成，以降低长正文请求超时风险。请重点检查两版之间的节奏差异和场景连续性。"],
-  };
-
-  const now = new Date();
-  const filePath = await writeArtifact(project.rootPath, "drafts", "scribe-drafts", JSON.stringify(result, null, 2));
-  const artifactId = randomUUID();
-  const runId = await recordWorkflowRun({
-    agentId: "scribe",
-    artifactId,
-    currentStep: "drafting",
-    projectId: project.id,
-    stepType: "agent",
-    summary: `Scribe generated draft variants for ${beatSheet.chapterTitle}.`,
-    title: "Generate Scribe draft variants",
+    },
   });
-
-  await db.insert(schema.artifacts).values({
-    id: artifactId,
-    projectId: project.id,
-    runId,
-    kind: "draft",
-    title: `Scribe drafts for ${beatSheet.chapterTitle}`,
-    filePath,
-    createdAt: now,
-  });
-
-  await db.update(schema.projects).set({ updatedAt: now }).where(eq(schema.projects.id, project.id));
-
-  revalidatePath(`/projects/${project.id}`);
-  revalidatePath(`/projects/${project.id}/runs`);
 }
 
 export async function runArchitectForProject(formData: FormData) {
@@ -656,9 +826,16 @@ export async function runArchitectForProject(formData: FormData) {
     throw new Error("Selected direction option not found.");
   }
 
-  const manuscriptContext = await requireProjectManuscriptContext(project);
-  const recall = await buildNovelRecallContext(project.rootPath);
-  const prompt = `Project: ${project.name}
+  await requireProjectManuscriptContext(project);
+
+  await startJob({
+    projectId: project.id,
+    kind: "architect",
+    title: "生成章节大纲",
+    executor: async () => {
+      const manuscriptContext = await requireProjectManuscriptContext(project);
+      const recall = await buildNovelRecallContext(project.rootPath);
+      const prompt = `Project: ${project.name}
 
 续写上文（章节大纲第一场必须承接这段上文的最后状态、地点、人物动作和情绪）:
 ${manuscriptContextExcerpt(manuscriptContext)}
@@ -673,34 +850,22 @@ Project memory:
 ${recallExcerpt(recall)}
 
 Create a chapter beat sheet for this selected direction.`;
-  const result = await runAgent({ agent: agents.architect, prompt, maxTokens: 2600 });
-  const now = new Date();
-  const filePath = await writeArtifact(project.rootPath, "outlines", `outline-${selectedOption.id}`, JSON.stringify(result, null, 2));
-  const artifactId = randomUUID();
-  const runId = await recordWorkflowRun({
-    agentId: "architect",
-    artifactId,
-    currentStep: "outline",
-    projectId: project.id,
-    stepType: "agent",
-    summary: `Architect generated an outline for option ${selectedOption.id}.`,
-    title: "Generate Architect outline",
+      const result = await runAgent({ agent: agents.architect, prompt, maxTokens: 2600, label: `生成大纲：方向 ${selectedOption.id}` });
+
+      await persistJobArtifact({
+        project,
+        kind: "outline",
+        relativeDir: "outlines",
+        fileName: `outline-${selectedOption.id}`,
+        title: `Architect outline for option ${selectedOption.id}`,
+        content: JSON.stringify(result, null, 2),
+        agentId: "architect",
+        stepTitle: "Generate Architect outline",
+        summary: `Architect generated an outline for option ${selectedOption.id}.`,
+        parentArtifactId: directionArtifact.id,
+      });
+    },
   });
-
-  await db.insert(schema.artifacts).values({
-    id: artifactId,
-    projectId: project.id,
-    runId,
-    kind: "outline",
-    title: `Architect outline for option ${selectedOption.id}`,
-    filePath,
-    createdAt: now,
-  });
-
-  await db.update(schema.projects).set({ updatedAt: now }).where(eq(schema.projects.id, project.id));
-
-  revalidatePath(`/projects/${project.id}`);
-  revalidatePath(`/projects/${project.id}/runs`);
 }
 
 export async function updateDraftArtifact(formData: FormData) {
@@ -809,6 +974,7 @@ async function runEditorSegment(input: {
   recall: string;
   segment: DraftVariant["segments"][number];
   variant: DraftVariant;
+  label?: string;
 }) {
   const prompt = `Project: ${input.projectName}
 
@@ -844,7 +1010,7 @@ ${tailText(input.recall, 2400)}
 
 Polish only the current scene segment. Keep the same sceneId and sceneTitle. Return only the edited scene JSON.`;
 
-  return runAgent({ agent: agents.editorSegment, prompt, maxTokens: 2200 });
+  return runAgent({ agent: agents.editorSegment, prompt, maxTokens: 2200, label: input.label });
 }
 
 export async function runEditorForProject(formData: FormData) {
@@ -868,91 +1034,69 @@ export async function runEditorForProject(formData: FormData) {
     throw new Error("Unable to read draft artifact.");
   }
 
-  const manuscriptContext = await requireProjectManuscriptContext(project);
-  const recall = await buildNovelRecallContext(project.rootPath);
-  const variants: EditedVariant[] = [];
+  await requireProjectManuscriptContext(project);
 
-  for (const variant of draftSet.variants) {
-    const editedSegments: EditedSegment[] = [];
+  await startJob({
+    projectId: project.id,
+    kind: "editor",
+    title: "润色分段草稿",
+    executor: async () => {
+      const manuscriptContext = await requireProjectManuscriptContext(project);
+      const recall = await buildNovelRecallContext(project.rootPath);
+      const variants: EditedVariant[] = [];
 
-    for (const [segmentIndex, segment] of variant.segments.entries()) {
-      try {
-        const previousContext = editedSegments.map((editedSegment) => editedSegment.manuscript).join("\n\n");
-        const nextSegment = variant.segments[segmentIndex + 1];
-        const editedSegment = await runEditorSegment({
-          draftSetTitle: draftSet.outlineTitle,
-          manuscriptContext,
-          nextSceneHint: nextSegment ? `${nextSegment.sceneId}: ${nextSegment.sceneTitle} — ${nextSegment.manuscript.slice(0, 500)}` : undefined,
-          previousContext,
-          projectName: project.name,
-          recall,
-          segment,
-          variant,
+      for (const variant of draftSet.variants) {
+        const editedSegments: EditedSegment[] = [];
+        const sceneTotal = variant.segments.length;
+
+        for (const [segmentIndex, segment] of variant.segments.entries()) {
+          const previousContext = editedSegments.map((editedSegment) => editedSegment.manuscript).join("\n\n");
+          const nextSegment = variant.segments[segmentIndex + 1];
+          const editedSegment = await runEditorSegment({
+            draftSetTitle: draftSet.outlineTitle,
+            manuscriptContext,
+            nextSceneHint: nextSegment ? `${nextSegment.sceneId}: ${nextSegment.sceneTitle} — ${nextSegment.manuscript.slice(0, 500)}` : undefined,
+            previousContext,
+            projectName: project.name,
+            recall,
+            segment,
+            variant,
+            label: `润色 变体 ${variant.id} · 第 ${segmentIndex + 1} 场 / 共 ${sceneTotal} 场：${segment.sceneTitle}`,
+          });
+          editedSegments.push(editedSegment);
+        }
+
+        variants.push({
+          id: `${variant.id}-edited`,
+          sourceVariantId: variant.id,
+          title: `${variant.title}（润色版）`,
+          editStrategy: `按场景分段润色，保持“${variant.strategy}”的变体策略。`,
+          changesMade: editedSegments.flatMap((segment) => segment.changesMade.map((change) => `${segment.sceneId}: ${change}`)),
+          remainingConcerns: editedSegments.flatMap((segment) => segment.remainingConcerns.map((concern) => `${segment.sceneId}: ${concern}`)),
+          manuscript: editedSegments.map((segment) => segment.manuscript.trim()).filter(Boolean).join("\n\n"),
         });
-        editedSegments.push(editedSegment);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.error("Editor segment agent failed", {
-          errorName: error instanceof Error ? error.name : "UnknownError",
-          message,
-          maxTokens: 2200,
-          sceneId: segment.sceneId,
-          variantId: variant.id,
-        });
-        await recordWorkflowRun({
-          agentId: "editor",
-          currentStep: "editing",
-          projectId: project.id,
-          status: "failed",
-          stepType: "agent",
-          summary: `Editor failed for ${draftSet.outlineTitle} variant ${variant.id} scene ${segment.sceneId}: ${message.slice(0, 160)}`,
-          title: "Polish draft scene",
-        });
-        throw error;
       }
-    }
 
-    variants.push({
-      id: `${variant.id}-edited`,
-      sourceVariantId: variant.id,
-      title: `${variant.title}（润色版）`,
-      editStrategy: `按场景分段润色，保持“${variant.strategy}”的变体策略。`,
-      changesMade: editedSegments.flatMap((segment) => segment.changesMade.map((change) => `${segment.sceneId}: ${change}`)),
-      remainingConcerns: editedSegments.flatMap((segment) => segment.remainingConcerns.map((concern) => `${segment.sceneId}: ${concern}`)),
-      manuscript: editedSegments.map((segment) => segment.manuscript.trim()).filter(Boolean).join("\n\n"),
-    });
-  }
+      const result: EditSet = {
+        sourceDraftTitle: draftSet.outlineTitle,
+        variants,
+        editorNotes: ["润色已按场景分段执行，以降低长正文请求超时风险。请重点检查场景之间的衔接是否顺滑。"],
+      };
 
-  const result: EditSet = {
-    sourceDraftTitle: draftSet.outlineTitle,
-    variants,
-    editorNotes: ["润色已按场景分段执行，以降低长正文请求超时风险。请重点检查场景之间的衔接是否顺滑。"],
-  };
-  const now = new Date();
-  const filePath = await writeArtifact(project.rootPath, "finals", "editor-polished-drafts", JSON.stringify(result, null, 2));
-  const artifactId = randomUUID();
-  const runId = await recordWorkflowRun({
-    agentId: "editor",
-    artifactId,
-    currentStep: "editing",
-    projectId: project.id,
-    stepType: "agent",
-    summary: `Editor polished drafts for ${draftSet.outlineTitle}.`,
-    title: "Polish draft variants",
+      await persistJobArtifact({
+        project,
+        kind: "edit",
+        relativeDir: "finals",
+        fileName: "editor-polished-drafts",
+        title: `Editor polished drafts for ${draftSet.outlineTitle}`,
+        content: JSON.stringify(result, null, 2),
+        agentId: "editor",
+        stepTitle: "Polish draft variants",
+        summary: `Editor polished drafts for ${draftSet.outlineTitle}.`,
+        parentArtifactId: draftArtifact.id,
+      });
+    },
   });
-
-  await db.insert(schema.artifacts).values({
-    id: artifactId,
-    projectId: project.id,
-    runId,
-    kind: "edit",
-    title: `Editor polished drafts for ${draftSet.outlineTitle}`,
-    filePath,
-    createdAt: now,
-  });
-
-  await db.update(schema.projects).set({ updatedAt: now }).where(eq(schema.projects.id, project.id));
-  revalidatePath(`/projects/${project.id}`);
 }
 
 function strongestVerdict(reviews: VariantReview[]) {
@@ -1012,7 +1156,12 @@ ${recallExcerpt(input.recall)}
 
 Critically review this chunk of a single variant for Gate 3 selection. Return only this variant chunk's review JSON.`;
 
-  return runAgent({ agent: agents.criticVariant, prompt, maxTokens: 1800 });
+  return runAgent({
+    agent: agents.criticVariant,
+    prompt,
+    maxTokens: 1800,
+    label: `审稿 变体 ${input.variant.id} · 块 ${input.chunkIndex + 1} / 共 ${input.chunkTotal}`,
+  });
 }
 
 async function runCriticVariant(input: {
@@ -1073,78 +1222,228 @@ export async function runCriticForProject(formData: FormData) {
     throw new Error("Unable to read review source artifact.");
   }
 
-  const manuscriptContext = await requireProjectManuscriptContext(project);
-  const recall = await buildNovelRecallContext(project.rootPath);
-  const reviews: VariantReview[] = [];
-  const candidates = reviewCandidates(source);
+  await requireProjectManuscriptContext(project);
 
-  for (const candidate of candidates) {
-    try {
-      const review = await runCriticVariant({
-        artifactKind,
-        manuscriptContext,
-        projectName: project.name,
-        recall,
-        sourceTitle: sourceArtifact.title,
-        variant: candidate,
-      });
-      reviews.push(review);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error("Critic variant agent failed", {
-        errorName: error instanceof Error ? error.name : "UnknownError",
-        message,
-        maxTokens: 2200,
-        variantId: candidate.id,
-      });
-      await recordWorkflowRun({
+  await startJob({
+    projectId: project.id,
+    kind: "critic",
+    title: "审稿",
+    executor: async () => {
+      const manuscriptContext = await requireProjectManuscriptContext(project);
+      const recall = await buildNovelRecallContext(project.rootPath);
+      const reviews: VariantReview[] = [];
+      const candidates = reviewCandidates(source);
+
+      for (const candidate of candidates) {
+        const review = await runCriticVariant({
+          artifactKind,
+          manuscriptContext,
+          projectName: project.name,
+          recall,
+          sourceTitle: sourceArtifact.title,
+          variant: candidate,
+        });
+        reviews.push(review);
+      }
+
+      const issueRank: Record<ReviewIssue["severity"], number> = { blocker: 3, major: 2, minor: 1 };
+      const allIssues = reviews.flatMap((review) => review.issues).sort((left, right) => issueRank[right.severity] - issueRank[left.severity]);
+      const passingReview = reviews.find((review) => review.verdict === "pass");
+      const result: CriticReview = {
+        verdict: strongestVerdict(reviews),
+        summary: reviews.map((review) => `${review.variantId}: ${review.summary}`).join("\n"),
+        issues: allIssues,
+        strongestVariantId: passingReview?.variantId ?? reviews.sort((left, right) => left.issues.length - right.issues.length)[0]?.variantId,
+        finalGateRecommendation: "审稿已按变体拆分执行。优先处理 blocker/major 问题；若存在 pass 变体，可作为终稿候选。",
+      };
+
+      await persistJobArtifact({
+        project,
+        kind: "review",
+        relativeDir: "reviews",
+        fileName: "critic-review",
+        title: `Critic review for ${sourceArtifact.title}`,
+        content: JSON.stringify(result, null, 2),
         agentId: "critic",
-        currentStep: "reviewing",
-        projectId: project.id,
-        status: "failed",
-        stepType: "agent",
-        summary: `Critic failed for ${sourceArtifact.title} variant ${candidate.id}: ${message.slice(0, 160)}`,
-        title: "Run Critic variant review",
+        stepTitle: "Run Critic review",
+        summary: `Critic reviewed ${sourceArtifact.title}.`,
+        parentArtifactId: sourceArtifact.id,
       });
-      throw error;
-    }
+    },
+  });
+}
+
+function issuesForVariant(issues: ReviewIssue[], variantId: string) {
+  // 无 variantId 的通用问题应用到所有被修订变体；其余按 variantId 匹配。
+  return issues.filter((issue) => !issue.variantId || issue.variantId === variantId);
+}
+
+function formatIssuesForPrompt(issues: ReviewIssue[]) {
+  return issues
+    .map((issue, index) => `${index + 1}. [${issue.severity}] ${issue.problem}\n   位置：${issue.location ?? "未指明"}\n   证据：${issue.evidence}\n   建议：${issue.suggestedFix}`)
+    .join("\n\n");
+}
+
+async function reviseVariantManuscript(input: {
+  manuscriptContext: string;
+  projectName: string;
+  recall: string;
+  variantId: string;
+  variantTitle: string;
+  manuscript: string;
+  issues: ReviewIssue[];
+}) {
+  const prompt = `Project: ${input.projectName}
+
+续写上文末尾（仅用于保持承接，不要复述）:
+${tailText(input.manuscriptContext, 1800)}
+
+Variant: ${input.variantId} — ${input.variantTitle}
+
+需要修复的审稿问题（只修这些，其余内容尽量保持不变）:
+${formatIssuesForPrompt(input.issues)}
+
+待修订的完整正文:
+${input.manuscript}
+
+Project memory excerpt:
+${recallExcerpt(input.recall)}
+
+Revise the manuscript to resolve the listed issues. Return the complete revised variant JSON.`;
+
+  return runAgent({ agent: agents.editorRevise, prompt, maxTokens: 4200, label: `修订 变体 ${input.variantId}` });
+}
+
+export async function reviseFromReviewForProject(formData: FormData) {
+  "use server";
+
+  const projectId = String(formData.get("projectId") ?? "");
+  const reviewArtifactId = String(formData.get("reviewArtifactId") ?? "");
+  const issueIndexes = formData.getAll("issueIndex").map((value) => Number(value)).filter((value) => Number.isInteger(value));
+  const project = await getProject(projectId);
+
+  if (!project) {
+    throw new Error("Project not found.");
   }
 
-  const issueRank: Record<ReviewIssue["severity"], number> = { blocker: 3, major: 2, minor: 1 };
-  const allIssues = reviews.flatMap((review) => review.issues).sort((left, right) => issueRank[right.severity] - issueRank[left.severity]);
-  const passingReview = reviews.find((review) => review.verdict === "pass");
-  const result: CriticReview = {
-    verdict: strongestVerdict(reviews),
-    summary: reviews.map((review) => `${review.variantId}: ${review.summary}`).join("\n"),
-    issues: allIssues,
-    strongestVariantId: passingReview?.variantId ?? reviews.sort((left, right) => left.issues.length - right.issues.length)[0]?.variantId,
-    finalGateRecommendation: "审稿已按变体拆分执行。优先处理 blocker/major 问题；若存在 pass 变体，可作为终稿候选。",
-  };
-  const now = new Date();
-  const filePath = await writeArtifact(project.rootPath, "reviews", "critic-review", JSON.stringify(result, null, 2));
-  const reviewArtifactId = randomUUID();
-  const runId = await recordWorkflowRun({
-    agentId: "critic",
-    artifactId: reviewArtifactId,
-    currentStep: "reviewing",
-    projectId: project.id,
-    stepType: "agent",
-    summary: `Critic reviewed ${sourceArtifact.title}.`,
-    title: "Run Critic review",
-  });
+  const [reviewArtifact] = await db.select().from(schema.artifacts).where(eq(schema.artifacts.id, reviewArtifactId));
+  if (!reviewArtifact || reviewArtifact.projectId !== project.id || reviewArtifact.kind !== "review") {
+    throw new Error("Review artifact not found.");
+  }
 
-  await db.insert(schema.artifacts).values({
-    id: reviewArtifactId,
-    projectId: project.id,
-    runId,
-    kind: "review",
-    title: `Critic review for ${sourceArtifact.title}`,
-    filePath,
-    createdAt: now,
-  });
+  const review = await readJsonArtifact<CriticReview>(project.rootPath, reviewArtifact.filePath);
+  if (!review) {
+    throw new Error("Unable to read review artifact.");
+  }
 
-  await db.update(schema.projects).set({ updatedAt: now }).where(eq(schema.projects.id, project.id));
-  revalidatePath(`/projects/${project.id}`);
+  const selectedIssues = issueIndexes.map((index) => review.issues[index]).filter(Boolean) as ReviewIssue[];
+  if (selectedIssues.length === 0) {
+    throw new Error("请至少勾选一个需要修复的问题。");
+  }
+
+  if (!reviewArtifact.parentArtifactId) {
+    throw new Error("该审稿记录缺少被审对象，无法修订（请对新生成的草稿/润色稿重新审稿后再修订）。");
+  }
+
+  const sourceArtifact = await getArtifactById(project.id, reviewArtifact.parentArtifactId);
+  if (!sourceArtifact || (sourceArtifact.kind !== "edit" && sourceArtifact.kind !== "draft")) {
+    throw new Error("被审对象不是草稿或润色稿，无法修订。");
+  }
+
+  // 修订统一输出 edit artifact；保持谱系：edit 源沿用其 parent（draft），draft 源以自身为 parent。
+  const newParentArtifactId = sourceArtifact.kind === "edit" ? sourceArtifact.parentArtifactId ?? sourceArtifact.id : sourceArtifact.id;
+
+  // 读出源变体与正文。
+  type SourceVariant = { id: string; title: string; strategy: string; manuscript: string };
+  let sourceTitle = sourceArtifact.title;
+  let sourceVariants: SourceVariant[];
+
+  if (sourceArtifact.kind === "edit") {
+    const editSet = await readJsonArtifact<EditSet>(project.rootPath, sourceArtifact.filePath);
+    if (!editSet) {
+      throw new Error("Unable to read source edit artifact.");
+    }
+    sourceTitle = editSet.sourceDraftTitle;
+    sourceVariants = editSet.variants.map((variant) => ({ id: variant.id, title: variant.title, strategy: variant.editStrategy, manuscript: variant.manuscript }));
+  } else {
+    const draftSet = await readJsonArtifact<DraftSet>(project.rootPath, sourceArtifact.filePath);
+    if (!draftSet) {
+      throw new Error("Unable to read source draft artifact.");
+    }
+    sourceTitle = draftSet.outlineTitle;
+    sourceVariants = draftSet.variants.map((variant) => ({ id: variant.id, title: variant.title, strategy: variant.strategy, manuscript: draftVariantManuscript(variant) }));
+  }
+
+  await requireProjectManuscriptContext(project);
+
+  await startJob({
+    projectId: project.id,
+    kind: "editor",
+    title: "按审稿修订",
+    executor: async () => {
+      const manuscriptContext = await requireProjectManuscriptContext(project);
+      const recall = await buildNovelRecallContext(project.rootPath);
+      const variants: EditedVariant[] = [];
+
+      for (const variant of sourceVariants) {
+        const variantIssues = issuesForVariant(selectedIssues, variant.id);
+        const baseId = variant.id.endsWith("-edited") ? variant.id : `${variant.id}-edited`;
+
+        if (variantIssues.length === 0) {
+          // 该变体没有选中问题：原样保留。
+          variants.push({
+            id: baseId,
+            sourceVariantId: variant.id,
+            title: variant.title,
+            editStrategy: variant.strategy,
+            changesMade: [],
+            remainingConcerns: [],
+            manuscript: variant.manuscript,
+          });
+          continue;
+        }
+
+        const revised: RevisedVariant = await reviseVariantManuscript({
+          manuscriptContext,
+          projectName: project.name,
+          recall,
+          variantId: variant.id,
+          variantTitle: variant.title,
+          manuscript: variant.manuscript,
+          issues: variantIssues,
+        });
+
+        variants.push({
+          id: baseId,
+          sourceVariantId: variant.id,
+          title: variant.title.includes("（修订版）") ? variant.title : `${variant.title}（修订版）`,
+          editStrategy: `按审稿修订：针对 ${variantIssues.length} 个选中问题修复，保留其余内容与变体策略。`,
+          changesMade: revised.changesMade,
+          remainingConcerns: revised.remainingConcerns,
+          manuscript: revised.manuscript,
+        });
+      }
+
+      const result: EditSet = {
+        sourceDraftTitle: sourceTitle,
+        variants,
+        editorNotes: [`本稿基于审稿记录修订，共处理 ${selectedIssues.length} 个选中问题。建议对修订版再次运行审稿确认问题已消解。`],
+      };
+
+      await persistJobArtifact({
+        project,
+        kind: "edit",
+        relativeDir: "finals",
+        fileName: "revised-drafts",
+        title: `Revised drafts for ${sourceTitle}`,
+        content: JSON.stringify(result, null, 2),
+        agentId: "editor",
+        stepTitle: "Revise per review",
+        summary: `Editor revised ${sourceTitle} per ${selectedIssues.length} selected issues.`,
+        parentArtifactId: newParentArtifactId,
+      });
+    },
+  });
 }
 
 export async function selectFinalVariantForProject(formData: FormData) {
@@ -1170,14 +1469,26 @@ export async function selectFinalVariantForProject(formData: FormData) {
     throw new Error("Selected edited variant not found.");
   }
 
-  const finalManuscript: FinalManuscript = {
+  const now = new Date();
+  const previousChapters = await latestFinalChapters(project);
+  const chapter: FinalChapter = {
+    id: randomUUID(),
     sourceArtifactId: editArtifact.id,
     sourceVariantId: variant.id,
     title: variant.title,
     manuscript: variant.manuscript,
     selectionNote: `Selected from ${editSet.sourceDraftTitle}`,
+    createdAt: now.toISOString(),
   };
-  const now = new Date();
+  const chapters = [...previousChapters, chapter];
+  const finalManuscript: FinalManuscript = {
+    sourceArtifactId: editArtifact.id,
+    sourceVariantId: variant.id,
+    title: variant.title,
+    manuscript: chapters.map((item, index) => `# 第 ${index + 1} 章：${item.title}\n\n${item.manuscript.trim()}`).join("\n\n"),
+    selectionNote: `Selected from ${editSet.sourceDraftTitle}`,
+    chapters,
+  };
   const filePath = await writeArtifact(project.rootPath, "selected-finals", `final-${variant.id}`, JSON.stringify(finalManuscript, null, 2));
   const artifactId = randomUUID();
   const runId = await recordWorkflowRun({
@@ -1193,6 +1504,7 @@ export async function selectFinalVariantForProject(formData: FormData) {
     id: artifactId,
     projectId: project.id,
     runId,
+    parentArtifactId: editArtifact.id,
     kind: "selected_final",
     title: `Selected final: ${variant.title}`,
     filePath,
@@ -1228,7 +1540,12 @@ ${JSON.stringify(
 
 Summarize memory-relevant facts from this selected final manuscript chunk.`;
 
-  return runAgent({ agent: agents.finalDigest, prompt, maxTokens: 1400 });
+  return runAgent({
+    agent: agents.finalDigest,
+    prompt,
+    maxTokens: 1400,
+    label: `摘要终稿 · 块 ${input.chunkIndex + 1} / 共 ${input.chunkTotal}`,
+  });
 }
 
 async function runFinalDigest(input: {
@@ -1280,32 +1597,19 @@ export async function runArchivistForProject(formData: FormData) {
     throw new Error("Unable to read selected final artifact.");
   }
 
-  const recall = await buildNovelRecallContext(project.rootPath);
-  let digest: FinalManuscriptDigest;
+  await startJob({
+    projectId: project.id,
+    kind: "archivist",
+    title: "生成记忆补丁",
+    executor: async () => {
+      const recall = await buildNovelRecallContext(project.rootPath);
+      const manuscriptContext = await readProjectManuscriptContext(project.id);
+      const digest = await runFinalDigest({ finalManuscript, projectName: project.name });
 
-  try {
-    digest = await runFinalDigest({ finalManuscript, projectName: project.name });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error("Archivist final digest agent failed", {
-      errorName: error instanceof Error ? error.name : "UnknownError",
-      finalArtifactId,
-      message,
-      maxTokens: 1800,
-    });
-    await recordWorkflowRun({
-      agentId: "archivist",
-      currentStep: "memory_patch",
-      projectId: project.id,
-      status: "failed",
-      stepType: "agent",
-      summary: `Archivist digest failed for ${finalManuscript.title}: ${message.slice(0, 160)}`,
-      title: "Summarize final manuscript",
-    });
-    throw error;
-  }
+      const prompt = `Project: ${project.name}
 
-  const prompt = `Project: ${project.name}
+前情（续写上文末尾，属于本章之前【已成立】的背景，不要当作本章新增内容；仅用于判断终稿里哪些才是真正的新变化）:
+${manuscriptContextExcerpt(manuscriptContext) || "（无前情）"}
 
 Selected final manuscript summary:
 ${JSON.stringify(digest, null, 2)}
@@ -1325,33 +1629,23 @@ ${JSON.stringify(
 Current project memory excerpt:
 ${recallExcerpt(recall)}
 
-Generate a conservative memory patch proposal. Do not apply changes.`;
-  const result = await runAgent({ agent: agents.archivist, prompt, maxTokens: 2400 });
-  const now = new Date();
-  const filePath = await writeArtifact(project.rootPath, "memory-patches", "archivist-memory-patch", JSON.stringify(result, null, 2));
-  const artifactId = randomUUID();
-  const runId = await recordWorkflowRun({
-    agentId: "archivist",
-    artifactId,
-    currentStep: "memory_patch",
-    projectId: project.id,
-    stepType: "agent",
-    summary: `Archivist generated a memory patch for ${finalManuscript.title}.`,
-    title: "Generate Archivist memory patch",
-  });
+Generate a conservative memory patch proposal. Do not apply changes.
+Only propose memory changes for facts that are genuinely new or changed in the selected final manuscript. Do not re-propose facts already established in the 前情 or current memory.`;
+      const result = await runAgent({ agent: agents.archivist, prompt, maxTokens: 2400, label: "生成记忆补丁" });
 
-  await db.insert(schema.artifacts).values({
-    id: artifactId,
-    projectId: project.id,
-    runId,
-    kind: "memory_patch",
-    title: `Memory patch for ${finalManuscript.title}`,
-    filePath,
-    createdAt: now,
+      await persistJobArtifact({
+        project,
+        kind: "memory_patch",
+        relativeDir: "memory-patches",
+        fileName: "archivist-memory-patch",
+        title: `Memory patch for ${finalManuscript.title}`,
+        content: JSON.stringify(result, null, 2),
+        agentId: "archivist",
+        stepTitle: "Generate Archivist memory patch",
+        summary: `Archivist generated a memory patch for ${finalManuscript.title}.`,
+      });
+    },
   });
-
-  await db.update(schema.projects).set({ updatedAt: now }).where(eq(schema.projects.id, project.id));
-  revalidatePath(`/projects/${project.id}`);
 }
 
 export async function applyMemoryPatchForProject(formData: FormData) {

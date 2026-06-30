@@ -10,19 +10,21 @@ import {
   listReviewArtifacts,
   listSelectedFinalArtifacts,
   readProjectManuscriptContext,
+  reviseFromReviewForProject,
 } from "@/app/actions";
-import { AgentSidebar } from "@/components/workspace/agent-sidebar";
 import { ArchitectPanel } from "@/components/workspace/architect-panel";
 import { CriticPanel } from "@/components/workspace/critic-panel";
 import { EditorPanel } from "@/components/workspace/editor-panel";
 import { FinalSelectionPanel } from "@/components/workspace/final-selection-panel";
-import { MemoryPatchPanel } from "@/components/workspace/memory-patch-panel";
-import { MemorySidebar } from "@/components/workspace/memory-sidebar";
+import { GenerationProcessPanel } from "@/components/workspace/generation-process-panel";
 import { ManuscriptContextPanel } from "@/components/workspace/manuscript-context-panel";
+import { MemoryPatchPanel } from "@/components/workspace/memory-patch-panel";
 import { MusePanel } from "@/components/workspace/muse-panel";
 import { ScribePanel } from "@/components/workspace/scribe-panel";
-import { WorkflowGates } from "@/components/workspace/workflow-gates";
+import { WorkspaceLayout, type StageSlot } from "@/components/workspace/workspace-layout";
 import { WorkspaceShell } from "@/components/workspace/workspace-shell";
+import { deriveStages, type StageKey } from "@/components/workspace/workspace-stage";
+import { finalChapters } from "@/schemas/final-manuscript";
 
 export default async function ProjectWorkspace({ params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = await params;
@@ -41,35 +43,82 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
   const memoryPatchArtifacts = await listMemoryPatchArtifacts(project.id);
   const manuscriptContext = await readProjectManuscriptContext(project.id);
 
+  const contextReady = manuscriptContext.trim().length > 0;
+  const done: Record<StageKey, boolean> = {
+    muse: directionArtifacts.length > 0,
+    architect: outlineArtifacts.length > 0,
+    scribe: draftArtifacts.length > 0,
+    editor: finalArtifacts.length > 0,
+    critic: reviewArtifacts.length > 0,
+    final: selectedFinalArtifacts.length > 0,
+    archive: memoryPatchArtifacts.length > 0,
+  };
+
+  const stages = deriveStages(done, contextReady);
+
+  const latestFinal = selectedFinalArtifacts[0]?.data ?? null;
+  const chapters = (latestFinal ? finalChapters(latestFinal) : []).map((chapter) => ({
+    id: chapter.id,
+    title: chapter.title,
+    manuscript: chapter.manuscript,
+  }));
+
+  const slots: StageSlot[] = [
+    {
+      key: "muse",
+      title: "构思方向",
+      subtitle: "读取上文与本地记忆，生成多个候选续写方向。",
+      content: <MusePanel directionArtifacts={directionArtifacts} projectId={project.id} />,
+    },
+    {
+      key: "architect",
+      title: "章节大纲",
+      subtitle: "把所选方向拆成章节目标与场景节拍，可阅读或编辑。",
+      content: <ArchitectPanel outlineArtifacts={outlineArtifacts} projectId={project.id} />,
+    },
+    {
+      key: "scribe",
+      title: "分段写作",
+      subtitle: "按大纲逐场景生成正文草稿变体。",
+      content: <ScribePanel draftArtifacts={draftArtifacts} projectId={project.id} />,
+    },
+    {
+      key: "editor",
+      title: "编辑润色",
+      subtitle: "按场景润色草稿，准备进入审稿与终稿选择。",
+      content: <EditorPanel finalArtifacts={finalArtifacts} projectId={project.id} />,
+    },
+    {
+      key: "critic",
+      title: "审稿",
+      subtitle: "对草稿或润色稿做对抗式审查，作为终稿选择的依据。",
+      content: <CriticPanel reviewArtifacts={reviewArtifacts} reviseAction={reviseFromReviewForProject} />,
+    },
+    {
+      key: "final",
+      title: "终稿选择",
+      subtitle: "选定润色变体作为本章终稿，累计进入全文。",
+      content: <FinalSelectionPanel projectId={project.id} selectedFinalArtifacts={selectedFinalArtifacts} />,
+    },
+    {
+      key: "archive",
+      title: "记忆归档",
+      subtitle: "从终稿提取记忆补丁，审批后写回本地记忆。",
+      content: <MemoryPatchPanel memoryPatchArtifacts={memoryPatchArtifacts} projectId={project.id} />,
+    },
+  ];
+
   return (
     <WorkspaceShell project={project}>
-      <section className="grid min-h-[680px] gap-4 lg:grid-cols-[260px_1fr_300px]">
-        <MemorySidebar />
-        <section className="rounded-3xl border border-stone-800 bg-stone-900/70 p-5">
-          <div className="flex items-center justify-between border-b border-stone-800 pb-4">
-            <div>
-              <p className="text-xs uppercase tracking-[0.3em] text-amber-300">小说工作流</p>
-              <h2 className="mt-2 text-2xl font-semibold">续写工作台</h2>
-            </div>
-            <button className="rounded-2xl bg-amber-300 px-4 py-2 text-sm font-medium text-stone-950 opacity-60" disabled>
-              工作流即将可用
-            </button>
-          </div>
-
-          <div className="mt-6 grid gap-4">
-            <ManuscriptContextPanel content={manuscriptContext} projectId={project.id} />
-            <MusePanel directionArtifacts={directionArtifacts} projectId={project.id} />
-            <WorkflowGates />
-            <ArchitectPanel outlineArtifacts={outlineArtifacts} projectId={project.id} />
-            <ScribePanel draftArtifacts={draftArtifacts} projectId={project.id} />
-            <EditorPanel finalArtifacts={finalArtifacts} projectId={project.id} />
-            <FinalSelectionPanel projectId={project.id} selectedFinalArtifacts={selectedFinalArtifacts} />
-            <MemoryPatchPanel memoryPatchArtifacts={memoryPatchArtifacts} projectId={project.id} />
-            <CriticPanel reviewArtifacts={reviewArtifacts} />
-          </div>
-        </section>
-        <AgentSidebar />
-      </section>
+      <WorkspaceLayout
+        projectId={project.id}
+        stages={stages}
+        slots={slots}
+        chapters={chapters}
+        manuscriptContext={manuscriptContext}
+        manuscriptContextSlot={<ManuscriptContextPanel content={manuscriptContext} projectId={project.id} variant="rail" />}
+        generationSlot={<GenerationProcessPanel projectId={project.id} />}
+      />
     </WorkspaceShell>
   );
 }

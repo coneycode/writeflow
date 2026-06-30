@@ -24,6 +24,13 @@ export const editSetSchema = z.object({
   editorNotes: z.array(z.string()),
 });
 
+export const revisedVariantSchema = z.object({
+  manuscript: z.string(),
+  changesMade: z.array(z.string()),
+  remainingConcerns: z.array(z.string()),
+});
+
 export type EditedVariant = z.infer<typeof editedVariantSchema>;
 export type EditedSegment = z.infer<typeof editedSegmentSchema>;
 export type EditSet = z.infer<typeof editSetSchema>;
+export type RevisedVariant = z.infer<typeof revisedVariantSchema>;
