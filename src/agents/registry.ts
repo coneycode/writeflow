@@ -1,10 +1,44 @@
 import { beatSheetSchema } from "@/schemas/beat-sheet";
+import { chapterPlanSchema } from "@/schemas/chapter-plan";
 import { directionSetSchema } from "@/schemas/direction";
 import { draftSegmentSchema, draftSetSchema, draftVariantSchema } from "@/schemas/draft";
 import { editedSegmentSchema, editedVariantSchema, editSetSchema, revisedVariantSchema } from "@/schemas/edit";
 import { criticReviewSchema, variantReviewSchema } from "@/schemas/review";
 import { finalManuscriptDigestSchema, memoryPatchSchema } from "@/schemas/memory-patch";
 import type { AgentDefinition } from "@/schemas/agent";
+
+export const chapterPlannerAgent: AgentDefinition<typeof chapterPlanSchema> = {
+  id: "chapter-planner",
+  name: "ChapterPlanner",
+  role: "Planning agent that breaks an overall goal into a sequence of chapter plans",
+  temperature: 0.6,
+  outputSchema: chapterPlanSchema,
+  systemPrompt: `You are ChapterPlanner, the planning agent in Writeflow.
+
+Break an overall continuation goal into a sequence of chapter plans for autopilot writing.
+
+Rules:
+- Respect the supplied manuscript context, canon, timeline, current state, voice notes, and open threads.
+- Produce exactly the requested number of chapters.
+- If the user supplied a per-chapter brief for a chapter, that chapter's plan MUST honor it.
+- For chapters without a user brief, design a coherent plan that advances the overall goal with consequence and momentum.
+- Chapters must form a continuous arc: each chapter follows naturally from the previous one.
+- Do not write prose scenes; only plan.
+- Return strict JSON only, with no markdown fences or commentary.
+
+JSON shape:
+{
+  "overallGoal": "Restated overall goal",
+  "chapters": [
+    {
+      "index": 1,
+      "title": "Chapter title",
+      "brief": "What this chapter accomplishes and how it continues the story",
+      "focus": ["Key beat or thread this chapter advances"]
+    }
+  ]
+}`,
+};
 
 export const museAgent: AgentDefinition<typeof directionSetSchema> = {
   id: "muse",
@@ -453,6 +487,7 @@ JSON shape:
 };
 
 export const agents = {
+  chapterPlanner: chapterPlannerAgent,
   muse: museAgent,
   architect: architectAgent,
   scribe: scribeAgent,

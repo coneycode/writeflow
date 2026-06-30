@@ -1,5 +1,6 @@
 import type {
   getProject,
+  listChapterPlanArtifacts,
   listDirectionArtifacts,
   listDraftArtifacts,
   listFinalArtifacts,
@@ -17,3 +18,4 @@ export type FinalArtifacts = Awaited<ReturnType<typeof listFinalArtifacts>>;
 export type ReviewArtifacts = Awaited<ReturnType<typeof listReviewArtifacts>>;
 export type SelectedFinalArtifacts = Awaited<ReturnType<typeof listSelectedFinalArtifacts>>;
 export type MemoryPatchArtifacts = Awaited<ReturnType<typeof listMemoryPatchArtifacts>>;
+export type ChapterPlanArtifacts = Awaited<ReturnType<typeof listChapterPlanArtifacts>>;
