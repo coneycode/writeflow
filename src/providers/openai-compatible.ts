@@ -19,6 +19,8 @@ export type GenerateTextInput = {
   model?: string;
   /** 提供后，使用流式请求并对每个增量片段回调（用于实时进度展示）。 */
   onToken?: (token: string) => void;
+  /** 取消信号：abort 时进行中的请求立即抛错。 */
+  signal?: AbortSignal;
 };
 
 export function loadProviderSettings(): ProviderSettings {
@@ -61,13 +63,16 @@ export class OpenAICompatibleProvider {
 
     try {
       if (input.onToken) {
-        const stream = await this.client.chat.completions.create({
-          model,
-          temperature: input.temperature ?? 0.8,
-          max_tokens: maxTokens,
-          messages,
-          stream: true,
-        });
+        const stream = await this.client.chat.completions.create(
+          {
+            model,
+            temperature: input.temperature ?? 0.8,
+            max_tokens: maxTokens,
+            messages,
+            stream: true,
+          },
+          { signal: input.signal },
+        );
 
         let content = "";
         for await (const chunk of stream) {
@@ -84,12 +89,15 @@ export class OpenAICompatibleProvider {
         return content;
       }
 
-      const response = await this.client.chat.completions.create({
-        model,
-        temperature: input.temperature ?? 0.8,
-        max_tokens: maxTokens,
-        messages,
-      });
+      const response = await this.client.chat.completions.create(
+        {
+          model,
+          temperature: input.temperature ?? 0.8,
+          max_tokens: maxTokens,
+          messages,
+        },
+        { signal: input.signal },
+      );
 
       const content = response.choices[0]?.message?.content;
       if (!content) {

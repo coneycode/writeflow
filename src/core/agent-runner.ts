@@ -33,6 +33,12 @@ export async function runAgent<TSchema extends z.ZodType>(input: {
 }) {
   const provider = new OpenAICompatibleProvider();
   const progress = currentProgress();
+
+  // 已请求中止：不再开新一步（多步任务在步骤之间即停）。
+  if (progress?.isCancelled) {
+    throw new Error("Run cancelled.");
+  }
+
   const stepId = progress?.startStep({
     agent: input.agent.name,
     label: input.label ?? input.agent.name,
@@ -46,6 +52,7 @@ export async function runAgent<TSchema extends z.ZodType>(input: {
       temperature: input.agent.temperature,
       maxTokens: input.maxTokens,
       onToken: stepId ? (token) => progress?.appendToken(stepId, token) : undefined,
+      signal: progress?.signal,
     });
 
     const parsed = JSON.parse(extractJsonObject(raw));

@@ -11,7 +11,7 @@ import { projectRoot } from "@/lib/paths";
 export type RunKind = "muse" | "architect" | "scribe" | "editor" | "critic" | "final" | "archivist";
 
 export type RunStepStatus = "running" | "completed" | "failed";
-export type RunStatus = "running" | "completed" | "failed" | "interrupted";
+export type RunStatus = "running" | "completed" | "failed" | "interrupted" | "cancelled";
 
 export type RunStep = {
   id: string;
@@ -64,9 +64,29 @@ export class RunProgress {
   private flushTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private writeChain: Promise<void> = Promise.resolve();
+  private controller = new AbortController();
+  private cancelled = false;
 
   constructor(state: RunState) {
     this.state = state;
+  }
+
+  /** 传给模型请求的取消信号；中止时 abort，使进行中的流式请求立即抛错。 */
+  get signal() {
+    return this.controller.signal;
+  }
+
+  get isCancelled() {
+    return this.cancelled;
+  }
+
+  /** 请求中止：置标志并 abort 信号。executor 会在下一次 runAgent 前或流式循环中感知。 */
+  cancel() {
+    if (this.cancelled) {
+      return;
+    }
+    this.cancelled = true;
+    this.controller.abort();
   }
 
   /** 运行中定期刷新 updatedAt 并落盘，作为心跳，避免长调用被误判为中断。 */
@@ -203,6 +223,37 @@ export class RunProgress {
     await this.flushNow();
     await updateRunRow(this.state.runId, "failed", error.slice(0, 160));
   }
+
+  async markCancelled() {
+    this.stopHeartbeat();
+    this.state.status = "cancelled";
+    this.state.error = "已被用户中止。";
+    const running = this.state.steps.find((item) => item.status === "running");
+    if (running) {
+      running.status = "failed";
+      running.endedAt = new Date().toISOString();
+    }
+    this.touch();
+    await this.flushNow();
+    await updateRunRow(this.state.runId, "cancelled", "已被用户中止");
+  }
+}
+
+// 活跃 run 注册表：按 runId 持有 RunProgress，供取消 API 查找并请求中止。
+const activeRuns = new Map<string, RunProgress>();
+
+/** 请求中止指定 run。返回是否找到活跃任务。 */
+export function requestCancel(runId: string): boolean {
+  const progress = activeRuns.get(runId);
+  if (!progress) {
+    return false;
+  }
+  progress.cancel();
+  return true;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && (error.name === "AbortError" || error.name === "APIUserAbortError");
 }
 
 const storage = new AsyncLocalStorage<RunProgress>();
@@ -212,7 +263,7 @@ export function currentProgress(): RunProgress | undefined {
   return storage.getStore();
 }
 
-async function updateRunRow(runId: string, status: "completed" | "failed", summary: string) {
+async function updateRunRow(runId: string, status: "completed" | "failed" | "cancelled", summary: string) {
   await db
     .update(schema.runs)
     .set({ status, summary, updatedAt: new Date() })
@@ -263,18 +314,32 @@ export async function startJob(input: {
   executor: () => Promise<void>;
 }) {
   const progress = await createRun({ projectId: input.projectId, kind: input.kind, title: input.title });
+  activeRuns.set(progress.runId, progress);
+
+  const settle = async (error?: unknown) => {
+    activeRuns.delete(progress.runId);
+    if (progress.isCancelled || isAbortError(error)) {
+      await progress.markCancelled();
+      return;
+    }
+    if (error !== undefined) {
+      await progress.fail(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    await progress.complete();
+  };
 
   void storage
     .run(progress, async () => {
       try {
         await input.executor();
-        await progress.complete();
+        await settle();
       } catch (error) {
-        await progress.fail(error instanceof Error ? error.message : String(error));
+        await settle(error);
       }
     })
     .catch(async (error) => {
-      await progress.fail(error instanceof Error ? error.message : String(error));
+      await settle(error);
     });
 
   return { runId: progress.runId };

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type RunStepStatus = "running" | "completed" | "failed";
-type RunStatus = "running" | "completed" | "failed" | "interrupted" | "missing";
+type RunStatus = "running" | "completed" | "failed" | "interrupted" | "cancelled" | "missing";
 
 type RunStep = {
   id: string;
@@ -32,6 +32,7 @@ const statusLabels: Record<RunStatus, string> = {
   completed: "已完成",
   failed: "失败",
   interrupted: "已中断",
+  cancelled: "已中止",
   missing: "无记录",
 };
 
@@ -102,6 +103,7 @@ function StepCard({ step, defaultOpen }: { step: RunStep; defaultOpen: boolean }
 export function GenerationProcessPanel({ projectId }: { projectId: string }) {
   const router = useRouter();
   const [state, setState] = useState<RunState | null>(null);
+  const [cancelling, setCancelling] = useState(false);
   const [, forceTick] = useState(0);
   const sourceRef = useRef<EventSource | null>(null);
   const connectedRunRef = useRef<string | null>(null);
@@ -265,6 +267,28 @@ export function GenerationProcessPanel({ projectId }: { projectId: string }) {
     return () => clearInterval(timer);
   }, [state?.status]);
 
+  // 切换到非 running 状态时重置中止态（延到下一拍，避免在 effect 体内同步 setState）。
+  useEffect(() => {
+    if (state?.status === "running") {
+      return;
+    }
+    const timer = setTimeout(() => setCancelling(false), 0);
+    return () => clearTimeout(timer);
+  }, [state?.status]);
+
+  const handleCancel = useCallback(async () => {
+    if (!state || state.status !== "running") {
+      return;
+    }
+    setCancelling(true);
+    try {
+      await fetch(`/api/projects/${projectId}/runs/${state.runId}/cancel`, { method: "POST" });
+      // 中止后状态由 SSE / 轮询更新为 cancelled；这里不直接改 state。
+    } catch {
+      setCancelling(false);
+    }
+  }, [projectId, state]);
+
   if (!state) {
     return (
       <section className="rounded-2xl border border-stone-800 bg-stone-900/70 p-4">
@@ -276,7 +300,7 @@ export function GenerationProcessPanel({ projectId }: { projectId: string }) {
 
   const steps = state.steps ?? [];
   const runningStepId = [...steps].reverse().find((step) => step.status === "running")?.id;
-  const accentBorder = state.status === "failed" ? "border-red-400/40" : state.status === "running" ? "border-amber-300/30" : "border-stone-800";
+  const accentBorder = state.status === "failed" || state.status === "cancelled" ? "border-red-400/40" : state.status === "running" ? "border-amber-300/30" : "border-stone-800";
 
   return (
     <section className={`rounded-2xl border ${accentBorder} bg-stone-900/80 p-4 text-stone-100`}>
@@ -285,17 +309,29 @@ export function GenerationProcessPanel({ projectId }: { projectId: string }) {
           <p className="text-xs uppercase tracking-[0.3em] text-amber-300">生成过程</p>
           <h2 className="mt-1.5 text-base font-semibold">{state.title}</h2>
         </div>
-        <span
-          className={`shrink-0 rounded-full border px-2 py-1 text-[11px] ${
-            state.status === "failed"
-              ? "border-red-300/40 text-red-200"
-              : state.status === "completed"
-                ? "border-green-300/40 text-green-200"
-                : "border-amber-300/40 text-amber-200"
-          }`}
-        >
-          {statusLabels[state.status]}
-        </span>
+        <div className="flex shrink-0 items-center gap-2">
+          <span
+            className={`rounded-full border px-2 py-1 text-[11px] ${
+              state.status === "failed" || state.status === "cancelled"
+                ? "border-red-300/40 text-red-200"
+                : state.status === "completed"
+                  ? "border-green-300/40 text-green-200"
+                  : "border-amber-300/40 text-amber-200"
+            }`}
+          >
+            {statusLabels[state.status]}
+          </span>
+          {state.status === "running" ? (
+            <button
+              type="button"
+              onClick={handleCancel}
+              disabled={cancelling}
+              className="rounded-full border border-red-300/50 px-2.5 py-1 text-[11px] font-medium text-red-200 transition hover:bg-red-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {cancelling ? "中止中…" : "中止"}
+            </button>
+          ) : null}
+        </div>
       </div>
 
       <p className="mt-2 text-[11px] text-stone-500">
