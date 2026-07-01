@@ -1,10 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { ContextRail } from "./context-rail";
 import { StageRail } from "./stage-rail";
-import { defaultActiveStage, type StageKey, type StageStatus } from "./workspace-stage";
+import { defaultActiveStage, STAGE_ORDER, type StageKey, type StageStatus } from "./workspace-stage";
+
+const STAGE_KEYS = new Set<StageKey>(STAGE_ORDER.map((meta) => meta.key));
+const activeStageStorageKey = (projectId: string) => `writeflow:active-stage:${projectId}`;
 
 type ChapterPreview = {
   id: string;
@@ -40,7 +43,36 @@ export function WorkspaceLayout({
   generationSlot: React.ReactNode;
   autopilotSlot?: React.ReactNode;
 }) {
+  // 初值用派生的默认阶段（SSR 一致）；挂载后再从 sessionStorage 恢复上次所在阶段，
+  // 使刷新后停留在原地而非跳回默认（记忆归档）。
   const [activeStage, setActiveStage] = useState<StageKey>(() => defaultActiveStage(stages));
+
+  useEffect(() => {
+    // 延到下一拍执行，避免在 effect 体内同步 setState（与项目既有模式一致）。
+    const timer = setTimeout(() => {
+      try {
+        const saved = sessionStorage.getItem(activeStageStorageKey(projectId));
+        if (saved && STAGE_KEYS.has(saved as StageKey)) {
+          setActiveStage(saved as StageKey);
+        }
+      } catch {
+        // sessionStorage 不可用时忽略，退回默认阶段。
+      }
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [projectId]);
+
+  const selectStage = useCallback(
+    (key: StageKey) => {
+      setActiveStage(key);
+      try {
+        sessionStorage.setItem(activeStageStorageKey(projectId), key);
+      } catch {
+        // 忽略持久化失败
+      }
+    },
+    [projectId],
+  );
 
   const active = slots.find((slot) => slot.key === activeStage) ?? slots[0];
   const activeStatus = stages.find((stage) => stage.key === activeStage);
@@ -58,7 +90,7 @@ export function WorkspaceLayout({
       ) : null}
 
       <section className="grid min-h-[680px] gap-4 lg:grid-cols-[280px_minmax(0,1fr)_320px]">
-      <StageRail stages={stages} activeStage={activeStage} onSelect={setActiveStage} />
+      <StageRail stages={stages} activeStage={activeStage} onSelect={selectStage} />
 
       <section className="flex min-w-0 flex-col overflow-hidden rounded-3xl border border-stone-200 bg-doc-surface shadow-xl shadow-black/30">
         <header className="sticky top-0 z-10 border-b border-stone-200 bg-doc-surface/95 px-6 py-4 backdrop-blur">

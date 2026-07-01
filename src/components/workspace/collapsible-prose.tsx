@@ -13,16 +13,19 @@ const fadeClass: Record<FadeTone, string> = {
 /**
  * 可折叠长文：超过 collapsedHeight 时默认折叠，底部渐隐 + “展开全文/收起”。
  * 内容不超高时不显示按钮、不加遮罩。
+ * 展开后仍受 expandedMaxHeight 约束：超过则内部滚动，避免单段正文把页面拉得过长。
  */
 export function CollapsibleProse({
   text,
   className = "doc-prose text-[15px]",
   collapsedHeight = 320,
+  expandedMaxHeight = 720,
   fade = "card",
 }: {
   text: string;
   className?: string;
   collapsedHeight?: number;
+  expandedMaxHeight?: number;
   fade?: FadeTone;
 }) {
   const contentRef = useRef<HTMLParagraphElement | null>(null);
@@ -43,15 +46,17 @@ export function CollapsibleProse({
   }, [text, collapsedHeight]);
 
   const collapsed = overflowing && !expanded;
+  // 展开时限制最大高度并内部滚动。
+  const style: React.CSSProperties | undefined = collapsed
+    ? { maxHeight: collapsedHeight, overflow: "hidden" }
+    : expanded
+      ? { maxHeight: expandedMaxHeight, overflowY: "auto" }
+      : undefined;
 
   return (
     <div>
       <div className="relative">
-        <p
-          ref={contentRef}
-          className={className}
-          style={collapsed ? { maxHeight: collapsedHeight, overflow: "hidden" } : undefined}
-        >
+        <p ref={contentRef} className={className} style={style}>
           {text}
         </p>
         {collapsed ? (
