@@ -8,7 +8,15 @@ export const finalChapterSchema = z.object({
   manuscript: z.string(),
   selectionNote: z.string(),
   createdAt: z.string(),
+  /** 本章情节概要：定稿时生成一次并存下，供后续续写/拆章规划复用，避免每次重算。 */
+  summary: z.string().optional(),
 });
+
+/** 章节摘要 agent 的输出。 */
+export const chapterSummarySchema = z.object({
+  summary: z.string(),
+});
+export type ChapterSummary = z.infer<typeof chapterSummarySchema>;
 
 export const finalManuscriptSchema = z.object({
   sourceArtifactId: z.string(),
