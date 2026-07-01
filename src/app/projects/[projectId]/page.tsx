@@ -13,6 +13,7 @@ import {
   readProjectManuscriptContext,
   reviseFromReviewForProject,
   runAutopilotForProject,
+  runAutopilotFromPlanForProject,
 } from "@/app/actions";
 import { ArchitectPanel } from "@/components/workspace/architect-panel";
 import { AutopilotPanel } from "@/components/workspace/autopilot-panel";
@@ -127,6 +128,7 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
             projectId={project.id}
             chapterPlanArtifacts={chapterPlanArtifacts}
             runAutopilotAction={runAutopilotForProject}
+            runFromPlanAction={runAutopilotFromPlanForProject}
           />
         }
       />
