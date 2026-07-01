@@ -1665,6 +1665,77 @@ async function runFinalDigest(input: {
   } satisfies FinalManuscriptDigest;
 }
 
+/**
+ * 为「前情 / 续写上文」本身跑一次归档：把开篇上文提炼成记忆补丁（尤其是 timeline 事件）。
+ * 与 runArchivistForProject 的区别：这里前情就是【要归档的对象】，不再当作"已成立背景"排除。
+ * 产出照常走人工审批后应用。
+ */
+export async function runContextArchivistForProject(formData: FormData) {
+  "use server";
+
+  const projectId = String(formData.get("projectId") ?? "");
+  const project = await getProject(projectId);
+
+  if (!project) {
+    throw new Error("Project not found.");
+  }
+
+  const manuscriptContext = (await readProjectManuscriptContext(project.id)).trim();
+  if (!manuscriptContext) {
+    throw new Error("还没有续写上文可归档。请先在工作台的“续写上文”区域粘贴并保存开篇内容。");
+  }
+
+  await startJob({
+    projectId: project.id,
+    kind: "archivist",
+    title: "为前情生成记忆补丁",
+    executor: async () => {
+      const recall = await buildNovelRecallContext(project.rootPath);
+      // 复用终稿摘要器：把前情包成一份"终稿"来分块摘要，控制单次请求长度。
+      const digest = await runFinalDigest({
+        finalManuscript: {
+          sourceArtifactId: "manuscript-context",
+          sourceVariantId: "manuscript-context",
+          title: "前情 / 续写上文",
+          manuscript: manuscriptContext,
+          selectionNote: "对已有前情（开篇上文）归档",
+          chapters: [],
+        },
+        projectName: project.name,
+      });
+
+      const prompt = `Project: ${project.name}
+
+以下是本项目的【前情 / 续写开篇上文】。这一次它【就是要归档的对象】——请把其中已经发生、已成立的事实提炼成项目记忆，尤其是按时间顺序把关键事件写进 timeline。
+
+前情摘要（分块提炼）:
+${JSON.stringify(digest, null, 2)}
+
+Current project memory excerpt:
+${recallExcerpt(recall)}
+
+Generate a conservative memory patch proposal. Do not apply changes.
+- 把前情里的关键事件按时间顺序追加到 memory/canon/timeline.md（operation: append）。
+- 稳定的世界设定 / 人物 / 文风信息，追加到对应文件。
+- 只记录前情里【确实已经发生或已成立】的事实；不要臆造、不要预测后续。
+- 不要重复 current memory 里已有的条目。`;
+      const result = await runAgent({ agent: agents.archivist, prompt, maxTokens: 2400, label: "为前情生成记忆补丁" });
+
+      await persistJobArtifact({
+        project,
+        kind: "memory_patch",
+        relativeDir: "memory-patches",
+        fileName: "archivist-context-memory-patch",
+        title: "Memory patch for 前情/上文",
+        content: JSON.stringify(result, null, 2),
+        agentId: "archivist",
+        stepTitle: "Generate context memory patch",
+        summary: "Archivist generated a memory patch for the prior manuscript context.",
+      });
+    },
+  });
+}
+
 export async function runArchivistForProject(formData: FormData) {
   "use server";
 
