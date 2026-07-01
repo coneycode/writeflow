@@ -6,10 +6,12 @@ export function AutopilotPanel({
   projectId,
   chapterPlanArtifacts,
   runAutopilotAction,
+  runFromPlanAction,
 }: {
   projectId: string;
   chapterPlanArtifacts: ChapterPlanArtifacts;
   runAutopilotAction: (formData: FormData) => void | Promise<void>;
+  runFromPlanAction: (formData: FormData) => void | Promise<void>;
 }) {
   const latestPlan = chapterPlanArtifacts[0]?.data ?? null;
 
@@ -73,7 +75,24 @@ export function AutopilotPanel({
 
       {latestPlan ? (
         <div className="mt-5 rounded-xl border border-stone-200 bg-stone-50 p-4">
-          <p className="text-xs font-medium uppercase tracking-[0.18em] text-doc-accent">最新章节规划</p>
+          <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+            <p className="text-xs font-medium uppercase tracking-[0.18em] text-doc-accent">最新章节规划</p>
+            <form action={runFromPlanAction}>
+              <input type="hidden" name="projectId" value={projectId} />
+              <SubmitButton
+                pendingText="开写中..."
+                processHint={{
+                  agent: "自动续写",
+                  description: "不重新拆章，直接基于当前最新章节规划逐章写完全流程。",
+                  steps: ["读取现有章节规划", "跳过已定稿章", "逐章：构思→大纲→写作→润色→审稿", "选终稿累计进全文", "自动应用记忆补丁"],
+                  title: "基于现有规划开写",
+                }}
+                className="shrink-0 rounded-lg border border-stone-300 px-3 py-1.5 text-xs font-medium text-stone-700 transition hover:border-stone-400 hover:bg-stone-900 hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                基于此规划开写
+              </SubmitButton>
+            </form>
+          </div>
           <p className="mt-2 text-sm leading-6 text-doc-text">{latestPlan.overallGoal}</p>
           <ol className="mt-3 space-y-2">
             {latestPlan.chapters.map((chapter) => (

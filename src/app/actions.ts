@@ -3046,6 +3046,52 @@ Break this into exactly ${chapterCount} NEW chapter plans that continue AFTER ch
 }
 
 /**
+ * 基于【已有的最新章节规划】直接开写：不重新拆章，用现存 chapter_plan 产物组装 batch 并逐章执行。
+ * 用于"已生成规划、想直接照它写下去"。runAutopilotBatch 会自动跳过已定稿章、逐章 checkpoint，
+ * 因此重复点击/中途失败都能安全续跑。
+ */
+export async function runAutopilotFromPlanForProject(formData: FormData) {
+  "use server";
+
+  const projectId = String(formData.get("projectId") ?? "");
+  const project = await getProject(projectId);
+  if (!project) {
+    throw new Error("Project not found.");
+  }
+
+  const plans = await listChapterPlanArtifacts(project.id);
+  const latest = plans[0]?.data ?? null;
+  if (!latest || !latest.chapters?.length) {
+    throw new Error("还没有章节规划。请先用上方表单生成一次规划，或直接发起自动续写。");
+  }
+
+  await requireProjectManuscriptContext(project);
+
+  const priorCount = (await latestFinalChapters(project)).length;
+  const batch: AutopilotBatch = {
+    batchId: randomUUID(),
+    overallGoal: latest.overallGoal,
+    // 产物里的 chapters 已是全局编号（autopilot 生成时重映射过）。
+    plan: latest.chapters,
+    priorChapterCountAtStart: priorCount,
+    status: "running",
+    autoRetryCount: 0,
+    checkpoints: {},
+  };
+  await writeBatch(project.id, batch);
+
+  await startJob({
+    projectId: project.id,
+    kind: "autopilot",
+    title: "基于现有规划自动续写",
+    executor: async () => {
+      await requireProjectManuscriptContext(project);
+      await runAutopilotBatch(project, batch);
+    },
+  });
+}
+
+/**
  * 断点续跑核心逻辑（供 server action 与 POST 路由共用；本身不是 server action）。
  * 返回是否真正启动了续跑（自动模式在超限/不适用时返回 false，不启动）。
  */
