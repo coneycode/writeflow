@@ -1730,7 +1730,49 @@ const AUTOPILOT_MAX_CHAPTERS = 10;
 
 type ChapterPipelineResult =
   | { status: "completed"; chapterTitle: string }
-  | { status: "quality_failed"; chapterTitle: string; verdict: string; issues: ReviewIssue[] };
+  | { status: "quality_failed"; chapterTitle: string; verdict: string; issues: ReviewIssue[] }
+  | { status: "duplicate"; chapterTitle: string; similarity: number };
+
+/** 章节相似度阈值：超过则判为与上一章重复，停止自动续写。 */
+const AUTOPILOT_DUPLICATE_THRESHOLD = 0.5;
+
+/** 归一化正文：去空白、标点，只留用于比对的字符流。 */
+function normalizeForSimilarity(text: string) {
+  return text.replace(/\s+/g, "").replace(/[，。！？、；：""''「」『』（）().,!?;:'"—…·]/g, "");
+}
+
+/**
+ * 两段正文的近重复度（0~1）。用字符 3-gram 的 Jaccard 相似度：
+ * 对中文这类无词边界的文本稳健，且能捕捉"整段几乎照搬"的情况。
+ */
+function manuscriptSimilarity(a: string, b: string): number {
+  const left = normalizeForSimilarity(a);
+  const right = normalizeForSimilarity(b);
+  if (!left || !right) {
+    return 0;
+  }
+  const shingles = (value: string) => {
+    const set = new Set<string>();
+    if (value.length < 3) {
+      set.add(value);
+      return set;
+    }
+    for (let index = 0; index + 3 <= value.length; index += 1) {
+      set.add(value.slice(index, index + 3));
+    }
+    return set;
+  };
+  const leftSet = shingles(left);
+  const rightSet = shingles(right);
+  let intersection = 0;
+  for (const gram of leftSet) {
+    if (rightSet.has(gram)) {
+      intersection += 1;
+    }
+  }
+  const union = leftSet.size + rightSet.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
 
 /** 把一份选定终稿变体累计追加进 selected_final（chapters[]），关联到当前后台任务 run。 */
 async function appendSelectedFinalChapter(input: {
@@ -1895,6 +1937,12 @@ async function runChapterPipeline(input: {
   project: NonNullable<Awaited<ReturnType<typeof getProject>>>;
   planned: PlannedChapter;
   chapterTotal: number;
+  /** 整体目标：让每章知道自己在整段弧线里要推进什么。 */
+  overallGoal: string;
+  /** 此前各章的规划（标题 + 要点），用于明确"已覆盖、勿重演"。 */
+  priorChapters: PlannedChapter[];
+  /** 下一章规划，用于"给后文留白、不要抢戏"。 */
+  nextChapter: PlannedChapter | null;
 }): Promise<ChapterPipelineResult> {
   const { project, planned } = input;
   const tag = `第 ${planned.index}/${input.chapterTotal} 章`;
@@ -1904,19 +1952,40 @@ async function runChapterPipeline(input: {
   const manuscriptContext = await requireProjectManuscriptContext(project);
   const recall = await buildNovelRecallContext(project.rootPath);
 
+  // 跨章边界说明：显式告诉本章"整体目标 / 前面已写什么 / 下一章留给谁"，
+  // 避免每章只看到"全文末尾 + 本章要点"而就地重演上一章的场面。
+  const priorSummary = input.priorChapters.length
+    ? input.priorChapters.map((chapter) => `- 第 ${chapter.index} 章《${chapter.title}》：${chapter.brief}`).join("\n")
+    : "（本章是第一章，之前没有已写章节）";
+  const nextSummary = input.nextChapter
+    ? `- 第 ${input.nextChapter.index} 章《${input.nextChapter.title}》：${input.nextChapter.brief}`
+    : "（本章是最后一章）";
+  const chapterBoundary = `整体目标（本章必须朝它推进，而不是原地打转）:
+${input.overallGoal}
+
+本章是第 ${planned.index} 章 / 共 ${input.chapterTotal} 章。
+
+此前已写章节（这些内容已经发生，本章【不得重述、不得重演】，必须从它们的结尾往前推进）:
+${priorSummary}
+
+下一章计划（把这些留给下一章，本章不要抢先写完）:
+${nextSummary}
+
+本章要交付的【新】进展（相较上一章的新变化：地点/信息/关系/状态至少推进一项）:
+${chapterBrief}`;
+
   // 1. 构思方向（自动采纳推荐）。
   const directionPrompt = `Project: ${project.name}
 
 续写上文（所有方向必须从这段上文的末尾自然延展，不得跳过当前场面）:
 ${manuscriptContextExcerpt(manuscriptContext)}
 
-User brief:
-${chapterBrief}
+${chapterBoundary}
 
 Project memory:
 ${recallExcerpt(recall)}
 
-Return three options unless the brief asks otherwise.`;
+请给出承接上文、且明显不同于"此前已写章节"的续写方向。Return three options unless the brief asks otherwise.`;
   const directionSet = await runAgent({ agent: agents.muse, prompt: directionPrompt, maxTokens: 2200, label: `${tag}·构思方向` });
   const directionArtifactId = await persistJobArtifact({
     project,
@@ -1939,6 +2008,8 @@ Return three options unless the brief asks otherwise.`;
 续写上文（章节大纲第一场必须承接这段上文的最后状态、地点、人物动作和情绪）:
 ${manuscriptContextExcerpt(manuscriptContext)}
 
+${chapterBoundary}
+
 Selected direction:
 ${JSON.stringify(selectedOption, null, 2)}
 
@@ -1948,7 +2019,7 @@ ${directionSet.recommendation}
 Project memory:
 ${recallExcerpt(recall)}
 
-Create a chapter beat sheet for this selected direction.`;
+Create a chapter beat sheet for this selected direction. 大纲的每一场都要服务于"本章新进展"，不得重复"此前已写章节"里的场面或情绪转折。`;
   const beatSheet = await runAgent({ agent: agents.architect, prompt: outlinePrompt, maxTokens: 2600, label: `${tag}·生成大纲` });
   const outlineArtifactId = await persistJobArtifact({
     project,
@@ -2061,6 +2132,17 @@ Create a chapter beat sheet for this selected direction.`;
     return { status: "quality_failed", chapterTitle: beatSheet.chapterTitle, verdict: reviewed.verdict, issues: reviewed.issues };
   }
 
+  // 5.5 近重复兜底：与上一章正文比对，过高则判为重复并停下，不把重复章交付进全文。
+  //     prompt 侧已强约束不重演，这里是硬网——模型仍产出雷同章时不静默通过。
+  const previousChapters = await latestFinalChapters(project);
+  const lastChapter = previousChapters.at(-1);
+  if (lastChapter) {
+    const similarity = manuscriptSimilarity(lastChapter.manuscript, reviewed.chosenVariant.manuscript);
+    if (similarity >= AUTOPILOT_DUPLICATE_THRESHOLD) {
+      return { status: "duplicate", chapterTitle: beatSheet.chapterTitle, similarity };
+    }
+  }
+
   // 6. 选定终稿，累计进全文。
   const finalManuscript = await appendSelectedFinalChapter({
     project,
@@ -2169,14 +2251,24 @@ Break this into exactly ${chapterCount} chapter plans.`;
 
       // 2. 逐章跑流水线。
       const planned = plan.chapters.slice(0, chapterCount);
-      for (const chapter of planned) {
+      for (const [chapterIndex, chapter] of planned.entries()) {
         if (currentProgress()?.isCancelled) {
           return;
         }
-        const result = await runChapterPipeline({ project, planned: chapter, chapterTotal: planned.length });
+        const result = await runChapterPipeline({
+          project,
+          planned: chapter,
+          chapterTotal: planned.length,
+          overallGoal: plan.overallGoal || overallGoal,
+          priorChapters: planned.slice(0, chapterIndex),
+          nextChapter: planned[chapterIndex + 1] ?? null,
+        });
         if (result.status === "quality_failed") {
           const blockers = result.issues.filter((issue) => issue.severity !== "minor").slice(0, 8).map((issue) => `- [${issue.severity}] ${issue.problem}`).join("\n");
           throw new Error(`在「${result.chapterTitle}」质量未达标（审稿 ${result.verdict}），已停止并保留此前已成章。未消解的主要问题：\n${blockers}`);
+        }
+        if (result.status === "duplicate") {
+          throw new Error(`在「${result.chapterTitle}」检测到与上一章高度重复（相似度 ${(result.similarity * 100).toFixed(0)}%），已停止并保留此前已成章。请调整该章要点或整体目标，让本章推进到新的情节，再重新自动续写。`);
         }
       }
     },
