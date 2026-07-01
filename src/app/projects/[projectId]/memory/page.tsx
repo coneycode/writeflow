@@ -2,10 +2,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import Link from "next/link";
 
-import { SubmitButton } from "@/components/forms/submit-button";
 import { notFound } from "next/navigation";
 
 import { getProject, updateProjectMemoryFile } from "@/app/actions";
+import { MemoryFileCard } from "@/components/workspace/memory-file-card";
 
 const memoryFiles = [
   ["当前状态", "memory/progress/state.md", "记录故事当前进展，以及下一章需要推进什么。"],
@@ -57,28 +57,15 @@ export default async function MemoryPage({ params }: { params: Promise<{ project
 
         <section className="mt-6 grid gap-4 md:grid-cols-2">
           {files.map((file) => (
-            <form key={file.relativePath} action={updateProjectMemoryFile} className="rounded-3xl border border-stone-800 bg-stone-900/70 p-5">
-              <input type="hidden" name="projectId" value={project.id} />
-              <input type="hidden" name="target" value={file.relativePath} />
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <h2 className="text-lg font-semibold">{file.title}</h2>
-                  <p className="mt-1 font-mono text-xs text-stone-500">{file.relativePath}</p>
-                  <p className="mt-2 text-xs leading-5 text-stone-500">{file.help}</p>
-                </div>
-                <SubmitButton pendingText="保存中..." className="rounded-full bg-amber-300 px-4 py-2 text-xs font-medium text-stone-950 transition hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-60">
-                  保存
-                </SubmitButton>
-              </div>
-              <textarea
-                name="content"
-                defaultValue={file.content}
-                rows={16}
-                spellCheck={false}
-                className="mt-4 w-full rounded-2xl border border-stone-800 bg-stone-950 p-4 font-mono text-sm leading-6 text-stone-300 outline-none transition placeholder:text-stone-600 focus:border-amber-300"
-                placeholder="在这里写 Markdown 记忆..."
-              />
-            </form>
+            <MemoryFileCard
+              key={file.relativePath}
+              projectId={project.id}
+              title={file.title}
+              relativePath={file.relativePath}
+              help={file.help}
+              content={file.content}
+              saveAction={updateProjectMemoryFile}
+            />
           ))}
         </section>
       </div>
