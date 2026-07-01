@@ -1531,6 +1531,68 @@ export async function selectFinalVariantForProject(formData: FormData) {
   revalidatePath(`/projects/${project.id}`);
 }
 
+/**
+ * 从最新终稿中删除指定章节（例如自动续写产出的重复章）。
+ * 删除后重算全文与顶层字段，写入新的 selected_final 产物；后续"已写全文"、
+ * 续写上文都从最新终稿派生，因此会自动收敛，无需手工改其它地方。
+ */
+export async function removeFinalChapterForProject(formData: FormData) {
+  "use server";
+
+  const projectId = String(formData.get("projectId") ?? "");
+  const chapterId = String(formData.get("chapterId") ?? "");
+  const project = await getProject(projectId);
+
+  if (!project) {
+    throw new Error("Project not found.");
+  }
+  if (!chapterId) {
+    throw new Error("缺少要删除的章节。");
+  }
+
+  const chapters = await latestFinalChapters(project);
+  const remaining = chapters.filter((chapter) => chapter.id !== chapterId);
+  if (remaining.length === chapters.length) {
+    throw new Error("未找到要删除的章节（可能已被更新）。");
+  }
+
+  const now = new Date();
+  const tail = remaining.at(-1);
+  const finalManuscript: FinalManuscript = {
+    sourceArtifactId: tail?.sourceArtifactId ?? "",
+    sourceVariantId: tail?.sourceVariantId ?? "",
+    title: tail?.title ?? "（无章节）",
+    manuscript: remaining.map((item, index) => `# 第 ${index + 1} 章：${item.title}\n\n${item.manuscript.trim()}`).join("\n\n"),
+    selectionNote: `删除 1 章后剩余 ${remaining.length} 章`,
+    chapters: remaining,
+  };
+
+  const filePath = await writeArtifact(project.rootPath, "selected-finals", `final-trim-${now.getTime()}`, JSON.stringify(finalManuscript, null, 2));
+  const artifactId = randomUUID();
+  const runId = await recordWorkflowRun({
+    artifactId,
+    currentStep: "final_selection",
+    projectId: project.id,
+    stepType: "gate",
+    summary: `Removed a chapter; ${remaining.length} chapters remain.`,
+    title: "Remove final chapter",
+  });
+
+  await db.insert(schema.artifacts).values({
+    id: artifactId,
+    projectId: project.id,
+    runId,
+    parentArtifactId: tail?.sourceArtifactId ?? null,
+    kind: "selected_final",
+    title: `Trimmed final: ${remaining.length} chapters`,
+    filePath,
+    createdAt: now,
+  });
+
+  await db.update(schema.projects).set({ updatedAt: now }).where(eq(schema.projects.id, project.id));
+  revalidatePath(`/projects/${project.id}`);
+}
+
 async function runFinalDigestChunk(input: {
   chunk: string;
   chunkIndex: number;

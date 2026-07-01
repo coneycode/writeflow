@@ -1,4 +1,4 @@
-import { runArchivistForProject, runMuseForProject } from "@/app/actions";
+import { removeFinalChapterForProject, runArchivistForProject, runMuseForProject } from "@/app/actions";
 import { SubmitButton } from "@/components/forms/submit-button";
 
 import { finalChapters } from "@/schemas/final-manuscript";
@@ -62,10 +62,20 @@ export function FinalSelectionPanel({ projectId, selectedFinalArtifacts }: { pro
                           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-stone-900 text-sm font-semibold text-white">
                             {index + 1}
                           </span>
-                          <div>
+                          <div className="min-w-0 flex-1">
                             <p className="text-base font-semibold text-stone-900">第 {index + 1} 章：{chapter.title}</p>
                             <p className="text-xs text-stone-400">{chapter.selectionNote}</p>
                           </div>
+                          <form action={removeFinalChapterForProject} className="shrink-0">
+                            <input type="hidden" name="projectId" value={projectId} />
+                            <input type="hidden" name="chapterId" value={chapter.id} />
+                            <button
+                              type="submit"
+                              className="rounded-lg border border-red-200 px-2.5 py-1 text-xs font-medium text-red-500 transition hover:border-red-400 hover:bg-red-50 hover:text-red-600"
+                            >
+                              删除本章
+                            </button>
+                          </form>
                         </div>
                         <div className="mt-4">
                           <CollapsibleProse text={chapter.manuscript} fade="card" />
