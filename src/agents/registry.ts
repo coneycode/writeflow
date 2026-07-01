@@ -6,6 +6,7 @@ import { editedSegmentSchema, editedVariantSchema, editSetSchema, revisedVariant
 import { criticReviewSchema, variantReviewSchema } from "@/schemas/review";
 import { finalManuscriptDigestSchema, memoryPatchSchema } from "@/schemas/memory-patch";
 import { chapterSummarySchema } from "@/schemas/final-manuscript";
+import { spanRewriteSchema } from "@/schemas/span-rewrite";
 import type { AgentDefinition } from "@/schemas/agent";
 
 export const chapterPlannerAgent: AgentDefinition<typeof chapterPlanSchema> = {
@@ -512,9 +513,35 @@ JSON shape:
 }`,
 };
 
+export const spanRewriteAgent: AgentDefinition<typeof spanRewriteSchema> = {
+  id: "span-rewrite",
+  name: "SpanRewriter",
+  role: "Rewrites a selected span of prose to satisfy a user instruction, in place",
+  temperature: 0.5,
+  outputSchema: spanRewriteSchema,
+  systemPrompt: `You are SpanRewriter in Writeflow.
+
+Rewrite ONLY the selected span of a chapter to satisfy the user's instruction.
+
+Rules:
+- Rewrite only the selected text. Do NOT continue past it or add content that belongs before/after the selection.
+- Keep seamless continuity with the surrounding text (before/after context is provided for reference only — do not repeat it).
+- Preserve the narrative voice, tense, point of view, and style of the surrounding prose.
+- Do not introduce new canon facts or plot turns beyond what the instruction asks.
+- Write in the story's language (Chinese if the prose is Chinese).
+- Return only the rewritten span as prose, no headings or labels.
+- Return strict JSON only, with no markdown fences or commentary.
+
+JSON shape:
+{
+  "rewritten": "重写后的选中片段正文"
+}`,
+};
+
 export const agents = {
   chapterPlanner: chapterPlannerAgent,
   chapterSummary: chapterSummaryAgent,
+  spanRewrite: spanRewriteAgent,
   muse: museAgent,
   architect: architectAgent,
   scribe: scribeAgent,
