@@ -22,7 +22,9 @@ Rules:
 - Produce exactly the requested number of chapters.
 - If the user supplied a per-chapter brief for a chapter, that chapter's plan MUST honor it.
 - For chapters without a user brief, design a coherent plan that advances the overall goal with consequence and momentum.
-- Chapters must form a continuous arc: each chapter follows naturally from the previous one.
+- Chapters must form a continuous arc: each chapter begins where the previous one ended and pushes the story to a NEW situation.
+- Every chapter MUST cover distinct ground. No two chapters may share the same setting-plus-beat, restage the same confrontation, or repeat the same emotional turn. If two chapters would overlap, merge them and give the freed slot a new development.
+- Each chapter's brief must state what NEW change of state, location, information, or relationship it delivers versus the chapter before it.
 - Do not write prose scenes; only plan.
 - Return strict JSON only, with no markdown fences or commentary.
 
