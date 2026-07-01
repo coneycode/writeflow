@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import type { ZodType } from "zod";
+
 export async function writeArtifact(rootPath: string, kind: string, title: string, content: string) {
   const safeTitle = title
     .toLowerCase()
@@ -28,10 +30,20 @@ export async function overwriteArtifact(rootPath: string, relativePath: string, 
   await fs.writeFile(target, content, "utf8");
 }
 
-export async function readJsonArtifact<T>(rootPath: string, relativePath: string): Promise<T | null> {
+/**
+ * 读取并解析 JSON 产物。传入 schema 时做运行时校验：磁盘上存在不符合 schema 的
+ * 旧/残缺产物（如缺字段）会返回 null，交由调用方走"无法读取"分支，
+ * 而不是把半个对象渗进 UI 引发 undefined.map 之类的运行时崩溃。
+ */
+export async function readJsonArtifact<T>(rootPath: string, relativePath: string, schema?: ZodType<T>): Promise<T | null> {
   try {
     const content = await fs.readFile(path.join(rootPath, relativePath), "utf8");
-    return JSON.parse(content) as T;
+    const parsed = JSON.parse(content);
+    if (schema) {
+      const result = schema.safeParse(parsed);
+      return result.success ? result.data : null;
+    }
+    return parsed as T;
   } catch {
     return null;
   }
