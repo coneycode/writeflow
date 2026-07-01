@@ -5,6 +5,7 @@ import { draftSegmentSchema, draftSetSchema, draftVariantSchema } from "@/schema
 import { editedSegmentSchema, editedVariantSchema, editSetSchema, revisedVariantSchema } from "@/schemas/edit";
 import { criticReviewSchema, variantReviewSchema } from "@/schemas/review";
 import { finalManuscriptDigestSchema, memoryPatchSchema } from "@/schemas/memory-patch";
+import { chapterSummarySchema } from "@/schemas/final-manuscript";
 import type { AgentDefinition } from "@/schemas/agent";
 
 export const chapterPlannerAgent: AgentDefinition<typeof chapterPlanSchema> = {
@@ -488,8 +489,32 @@ JSON shape:
 }`,
 };
 
+export const chapterSummaryAgent: AgentDefinition<typeof chapterSummarySchema> = {
+  id: "chapter-summary",
+  name: "ChapterSummarizer",
+  role: "Summarizes a finished chapter into a compact plot recap for later continuation",
+  temperature: 0.3,
+  outputSchema: chapterSummarySchema,
+  systemPrompt: `You are ChapterSummarizer in Writeflow.
+
+Condense one finished chapter into a compact recap that a planner can read to know what already happened.
+
+Rules:
+- Capture the concrete events, location and time changes, decisions, revelations, and relationship shifts that occurred in THIS chapter.
+- Be specific (names, places, what changed) but concise: 3-6 sentences, no more than ~200 Chinese characters.
+- Do not add interpretation, praise, or foreshadowing. Only what happened.
+- Write in the story's language (Chinese if the chapter is Chinese).
+- Return strict JSON only, with no markdown fences or commentary.
+
+JSON shape:
+{
+  "summary": "本章发生的具体事件与状态变化的简洁复述"
+}`,
+};
+
 export const agents = {
   chapterPlanner: chapterPlannerAgent,
+  chapterSummary: chapterSummaryAgent,
   muse: museAgent,
   architect: architectAgent,
   scribe: scribeAgent,
