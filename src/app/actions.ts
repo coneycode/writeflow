@@ -22,6 +22,7 @@ import type { EditedSegment, EditedVariant, EditSet, RevisedVariant } from "@/sc
 import type { CriticReview, ReviewIssue, VariantReview } from "@/schemas/review";
 import { finalChapters } from "@/schemas/final-manuscript";
 import type { FinalChapter, FinalManuscript } from "@/schemas/final-manuscript";
+import { memoryPatchSchema } from "@/schemas/memory-patch";
 import type { FinalManuscriptDigest, MemoryPatch } from "@/schemas/memory-patch";
 
 
@@ -411,7 +412,7 @@ export async function listMemoryPatchArtifacts(projectId: string) {
   return Promise.all(
     artifacts.map(async (artifact) => ({
       artifact,
-      data: await readJsonArtifact<MemoryPatch>(project.rootPath, artifact.filePath),
+      data: await readJsonArtifact<MemoryPatch>(project.rootPath, artifact.filePath, memoryPatchSchema),
     })),
   );
 }
@@ -1749,7 +1750,7 @@ export async function applyMemoryPatchForProject(formData: FormData) {
     throw new Error("Memory patch artifact not found.");
   }
 
-  const patch = await readJsonArtifact<MemoryPatch>(project.rootPath, patchArtifact.filePath);
+  const patch = await readJsonArtifact<MemoryPatch>(project.rootPath, patchArtifact.filePath, memoryPatchSchema);
   if (!patch) {
     throw new Error("Unable to read memory patch artifact.");
   }

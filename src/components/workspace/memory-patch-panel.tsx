@@ -21,6 +21,9 @@ export function MemoryPatchPanel({ memoryPatchArtifacts, projectId }: { memoryPa
             <div className="mt-3">
               <p className="text-sm font-medium text-doc-accent">{data.summary}</p>
               <p className="mt-2 text-xs text-doc-muted">新状态： {data.chapterState}</p>
+              {(data.changes ?? []).length === 0 ? (
+                <p className="mt-2 text-xs text-amber-600">这份补丁没有可应用的变更条目（可能是早期或不完整的产物）。</p>
+              ) : null}
               <form action={applyMemoryPatchForProject} className="mt-3">
                 <input type="hidden" name="projectId" value={projectId} />
                 <input type="hidden" name="memoryPatchArtifactId" value={artifact.id} />
@@ -32,7 +35,7 @@ export function MemoryPatchPanel({ memoryPatchArtifacts, projectId }: { memoryPa
                 应用会追加线索变化，并替换“更新”类型目标。批准前请逐条检查。
               </p>
               <div className="mt-3 space-y-2">
-                {data.changes.map((change, index) => (
+                {(data.changes ?? []).map((change, index) => (
                   <div key={`${change.target}-${index}`} className="rounded-lg border border-stone-200 bg-doc-card p-3">
                     <p className="text-sm font-medium text-doc-text">{operationLabels[change.operation] ?? change.operation}: {change.target}</p>
                     <p className="mt-1 text-xs text-doc-muted">{change.content}</p>
