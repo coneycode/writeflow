@@ -19,6 +19,7 @@ type RunStep = {
 
 type RunState = {
   runId: string;
+  kind?: string;
   title: string;
   status: RunStatus;
   startedAt: string;
@@ -26,6 +27,15 @@ type RunState = {
   error?: string;
   steps: RunStep[];
 };
+
+type ResumableInfo = {
+  resumable: boolean;
+  autoEligible: boolean;
+  autoRetriesLeft: number;
+  failure?: { globalIndex: number; kind: string; reason: string } | null;
+};
+
+const AUTO_RETRY_DELAY_MS = 60_000;
 
 const statusLabels: Record<RunStatus, string> = {
   running: "运行中",
@@ -104,7 +114,11 @@ export function GenerationProcessPanel({ projectId }: { projectId: string }) {
   const router = useRouter();
   const [state, setState] = useState<RunState | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const [resumable, setResumable] = useState<ResumableInfo | null>(null);
+  const [resuming, setResuming] = useState(false);
   const [, forceTick] = useState(0);
+  // 已排程/已触发过自动重试的 runId，避免重复排程。
+  const autoRetryScheduledRef = useRef<string | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
   const connectedRunRef = useRef<string | null>(null);
   const refreshedRef = useRef<string | null>(null);
@@ -296,6 +310,64 @@ export function GenerationProcessPanel({ projectId }: { projectId: string }) {
     }
   }, [projectId, state, findActive]);
 
+  // 触发续跑（手动或自动）。auto=true 为系统自动重试（受服务端上限约束）。
+  const triggerResume = useCallback(
+    async (auto: boolean) => {
+      setResuming(true);
+      try {
+        await fetch(`/api/projects/${projectId}/resume-autopilot${auto ? "?auto=1" : ""}`, { method: "POST" });
+        // 续跑会新建 run；触发查找并接管进度展示。
+        window.dispatchEvent(new CustomEvent("writeflow:job-submitted"));
+        setTimeout(() => void findActive(), 400);
+      } catch {
+        // 忽略；用户可再点手动按钮
+      } finally {
+        setTimeout(() => setResuming(false), 800);
+      }
+    },
+    [projectId, findActive],
+  );
+
+  // 当最近的 autopilot run 失败/中断时，查询是否可续跑，并按需排程 60s 自动重试。
+  useEffect(() => {
+    if (!state || state.kind !== "autopilot") {
+      return;
+    }
+    if (state.status !== "failed" && state.status !== "interrupted") {
+      const reset = setTimeout(() => setResumable(null), 0);
+      return () => clearTimeout(reset);
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    (async () => {
+      try {
+        const response = await fetch(`/api/projects/${projectId}/resumable-autopilot`, { cache: "no-store" });
+        const info = (await response.json()) as ResumableInfo;
+        if (cancelled) {
+          return;
+        }
+        setResumable(info);
+        // 符合自动重试条件、且本 run 尚未排程过：60s 后自动续跑一次。
+        if (info.autoEligible && autoRetryScheduledRef.current !== state.runId) {
+          autoRetryScheduledRef.current = state.runId;
+          timer = setTimeout(() => {
+            if (!cancelled) {
+              void triggerResume(true);
+            }
+          }, AUTO_RETRY_DELAY_MS);
+        }
+      } catch {
+        // 忽略
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+    };
+  }, [state, projectId, triggerResume]);
+
   if (!state) {
     return (
       <section className="rounded-2xl border border-stone-800 bg-stone-900/70 p-4">
@@ -351,6 +423,31 @@ export function GenerationProcessPanel({ projectId }: { projectId: string }) {
         <p className="mt-2 rounded-lg border border-amber-400/30 bg-amber-950/30 p-2 text-[11px] leading-5 text-amber-200">
           任务超过 2 分钟没有进展，可能是后台进程被中断或模型请求超时。可重新触发本步骤；若反复中断，请检查模型接口与超时配置。
         </p>
+      ) : null}
+
+      {resumable?.resumable ? (
+        <div className="mt-2 rounded-lg border border-amber-400/30 bg-amber-950/20 p-2.5">
+          <p className="text-[11px] leading-5 text-amber-100">
+            自动续写中断，已成章与已生成的阶段都已保留，可从断点继续（跳过已完成的章节与阶段）。
+          </p>
+          <div className="mt-2 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void triggerResume(false)}
+              disabled={resuming}
+              className="rounded-full border border-amber-300/60 px-3 py-1 text-[11px] font-medium text-amber-100 transition hover:bg-amber-300 hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {resuming ? "继续中…" : "继续未完成的自动续写"}
+            </button>
+            {resumable.autoEligible ? (
+              <span className="text-[11px] text-stone-400">约 1 分钟后将自动重试（剩 {resumable.autoRetriesLeft} 次）</span>
+            ) : resumable.failure?.kind === "quality" || resumable.failure?.kind === "duplicate" ? (
+              <span className="text-[11px] text-stone-400">该章需人工调整，不自动重试</span>
+            ) : resumable.autoRetriesLeft === 0 ? (
+              <span className="text-[11px] text-stone-400">已自动重试 3 次仍失败，请手动继续</span>
+            ) : null}
+          </div>
+        </div>
       ) : null}
 
       <div className="mt-3 space-y-2">
