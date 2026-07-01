@@ -409,12 +409,15 @@ export async function listMemoryPatchArtifacts(projectId: string) {
   }
 
   const artifacts = await listProjectArtifacts(projectId, "memory_patch");
-  return Promise.all(
+  const entries = await Promise.all(
     artifacts.map(async (artifact) => ({
       artifact,
       data: await readJsonArtifact<MemoryPatch>(project.rootPath, artifact.filePath, memoryPatchSchema),
     })),
   );
+  // 丢弃校验失败的条目（如历史遗留、被错误标成 memory_patch 的 applied 审计记录），
+  // 避免它们顶到最新一条并显示"无法读取"。
+  return entries.filter((entry) => entry.data !== null);
 }
 
 export async function listChapterPlanArtifacts(projectId: string) {
@@ -1782,7 +1785,9 @@ export async function applyMemoryPatchForProject(formData: FormData) {
     id: artifactId,
     projectId: project.id,
     runId,
-    kind: "memory_patch",
+    // 独立 kind：这是"已应用"的审计记录，结构不同于 memory_patch，
+    // 不能混进补丁列表，否则会顶到最新一条、校验失败显示"无法读取"。
+    kind: "memory_patch_applied",
     title: `Applied memory patch: ${patch.summary.slice(0, 80)}`,
     filePath,
     createdAt: now,
