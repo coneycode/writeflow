@@ -1,10 +1,18 @@
-import { removeFinalChapterForProject, runArchivistForProject, runMuseForProject } from "@/app/actions";
+import {
+  rebuildMemoryFromChaptersForProject,
+  removeFinalChapterForProject,
+  rewriteFinalChapterSpanForProject,
+  runArchivistForProject,
+  runMuseForProject,
+  updateFinalChapterForProject,
+} from "@/app/actions";
 import { SubmitButton } from "@/components/forms/submit-button";
 
 import { finalChapters } from "@/schemas/final-manuscript";
 
 import type { SelectedFinalArtifacts } from "./artifact-types";
 import { FinalChapterReader } from "./final-chapter-reader";
+import { RebuildMemoryButton } from "./rebuild-memory-button";
 import { StagePanel } from "./stage-panel";
 
 export function FinalSelectionPanel({ projectId, selectedFinalArtifacts }: { projectId: string; selectedFinalArtifacts: SelectedFinalArtifacts }) {
@@ -39,10 +47,19 @@ export function FinalSelectionPanel({ projectId, selectedFinalArtifacts }: { pro
                 </form>
               </div>
 
+              <div className="mt-4 flex flex-col gap-2 rounded-xl border border-stone-200 bg-doc-card p-3 md:flex-row md:items-center md:justify-between">
+                <p className="text-xs text-doc-muted">
+                  编辑或重写某章后，其 timeline/设定记忆会自动重同步。若历史记忆有重复或错乱，可从章节一键重建。
+                </p>
+                <RebuildMemoryButton projectId={projectId} rebuildAction={rebuildMemoryFromChaptersForProject} />
+              </div>
+
               <FinalChapterReader
                 projectId={projectId}
                 chapters={finalChapters(data)}
                 removeChapterAction={removeFinalChapterForProject}
+                updateChapterAction={updateFinalChapterForProject}
+                rewriteSpanAction={rewriteFinalChapterSpanForProject}
               />
 
               <div className="mt-4 flex flex-col gap-3 rounded-xl border border-stone-300 bg-doc-card p-4 md:flex-row md:items-center md:justify-between">
