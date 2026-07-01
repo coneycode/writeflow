@@ -4,7 +4,7 @@ import { SubmitButton } from "@/components/forms/submit-button";
 import { finalChapters } from "@/schemas/final-manuscript";
 
 import type { SelectedFinalArtifacts } from "./artifact-types";
-import { CollapsibleProse } from "./collapsible-prose";
+import { FinalChapterReader } from "./final-chapter-reader";
 import { StagePanel } from "./stage-panel";
 
 export function FinalSelectionPanel({ projectId, selectedFinalArtifacts }: { projectId: string; selectedFinalArtifacts: SelectedFinalArtifacts }) {
@@ -39,52 +39,11 @@ export function FinalSelectionPanel({ projectId, selectedFinalArtifacts }: { pro
                 </form>
               </div>
 
-              <div className="mt-4 grid gap-3 lg:grid-cols-[240px_1fr]">
-                <nav className="rounded-xl border border-stone-200 bg-doc-card p-3">
-                  <p className="text-xs font-medium text-doc-muted">章节列表</p>
-                  <ol className="mt-3 space-y-2">
-                    {finalChapters(data).map((chapter, index) => (
-                      <li key={chapter.id}>
-                        <a href={`#chapter-${chapter.id}`} className="block rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs text-doc-text transition hover:border-stone-400 hover:text-stone-900">
-                          第 {index + 1} 章：{chapter.title}
-                        </a>
-                      </li>
-                    ))}
-                  </ol>
-                </nav>
-
-                <div className="rounded-xl border border-stone-200 bg-stone-50 p-5">
-                  <p className="text-xs font-medium text-doc-muted">完整正文</p>
-                  <div className="mt-4 space-y-5">
-                    {finalChapters(data).map((chapter, index) => (
-                      <section key={chapter.id} id={`chapter-${chapter.id}`} className="scroll-mt-6 rounded-xl border border-stone-200 bg-doc-card p-5 shadow-sm">
-                        <div className="flex items-center gap-3 border-b border-stone-200 pb-3">
-                          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-stone-900 text-sm font-semibold text-white">
-                            {index + 1}
-                          </span>
-                          <div className="min-w-0 flex-1">
-                            <p className="text-base font-semibold text-stone-900">第 {index + 1} 章：{chapter.title}</p>
-                            <p className="text-xs text-stone-400">{chapter.selectionNote}</p>
-                          </div>
-                          <form action={removeFinalChapterForProject} className="shrink-0">
-                            <input type="hidden" name="projectId" value={projectId} />
-                            <input type="hidden" name="chapterId" value={chapter.id} />
-                            <button
-                              type="submit"
-                              className="rounded-lg border border-red-200 px-2.5 py-1 text-xs font-medium text-red-500 transition hover:border-red-400 hover:bg-red-50 hover:text-red-600"
-                            >
-                              删除本章
-                            </button>
-                          </form>
-                        </div>
-                        <div className="mt-4">
-                          <CollapsibleProse text={chapter.manuscript} fade="card" />
-                        </div>
-                      </section>
-                    ))}
-                  </div>
-                </div>
-              </div>
+              <FinalChapterReader
+                projectId={projectId}
+                chapters={finalChapters(data)}
+                removeChapterAction={removeFinalChapterForProject}
+              />
 
               <div className="mt-4 flex flex-col gap-3 rounded-xl border border-stone-300 bg-doc-card p-4 md:flex-row md:items-center md:justify-between">
                 <div>
