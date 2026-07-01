@@ -307,7 +307,7 @@ export async function updateProjectMemoryFile(formData: FormData) {
   revalidatePath(`/projects/${project.id}/memory`);
 }
 
-export async function listProjectArtifacts(projectId: string, kind?: "direction" | "outline" | "draft" | "edit" | "review" | "selected_final" | "memory_patch" | "chapter_plan") {
+export async function listProjectArtifacts(projectId: string, kind?: "direction" | "outline" | "draft" | "edit" | "review" | "selected_final" | "memory_patch" | "chapter_plan" | "context_archive") {
   const rows = await db.select().from(schema.artifacts).where(eq(schema.artifacts.projectId, projectId)).orderBy(desc(schema.artifacts.createdAt));
   return kind ? rows.filter((artifact) => artifact.kind === kind) : rows;
 }
@@ -1666,45 +1666,39 @@ async function runFinalDigest(input: {
 }
 
 /**
- * 为「前情 / 续写上文」本身跑一次归档：把开篇上文提炼成记忆补丁（尤其是 timeline 事件）。
- * 与 runArchivistForProject 的区别：这里前情就是【要归档的对象】，不再当作"已成立背景"排除。
- * 产出照常走人工审批后应用。
+ * 首次归档时，把「前情 / 续写开篇上文」也提炼进记忆（尤其是 timeline），并【自动应用】。
+ *
+ * 存储/血缘上，前情是"手工种子"、正文各章是"流水线产物"——这个区别只活在代码内部。
+ * 面向用户时，故事就是一个整体：记忆应当从第一句开始覆盖，而不该要用户手动补前情。
+ * 因此这里是内部幂等步骤：用一个 context_archive 标记产物记录"已归档过"，避免重复；
+ * 在任意归档入口（手动 / autopilot）开头调用一次即可，用户无需感知。
  */
-export async function runContextArchivistForProject(formData: FormData) {
-  "use server";
-
-  const projectId = String(formData.get("projectId") ?? "");
-  const project = await getProject(projectId);
-
-  if (!project) {
-    throw new Error("Project not found.");
+async function ensureContextArchived(project: NonNullable<Awaited<ReturnType<typeof getProject>>>) {
+  // 已归档过则直接跳过（幂等）。
+  const marker = await listProjectArtifacts(project.id, "context_archive");
+  if (marker.length > 0) {
+    return;
   }
-
   const manuscriptContext = (await readProjectManuscriptContext(project.id)).trim();
   if (!manuscriptContext) {
-    throw new Error("还没有续写上文可归档。请先在工作台的“续写上文”区域粘贴并保存开篇内容。");
+    return;
   }
 
-  await startJob({
-    projectId: project.id,
-    kind: "archivist",
-    title: "为前情生成记忆补丁",
-    executor: async () => {
-      const recall = await buildNovelRecallContext(project.rootPath);
-      // 复用终稿摘要器：把前情包成一份"终稿"来分块摘要，控制单次请求长度。
-      const digest = await runFinalDigest({
-        finalManuscript: {
-          sourceArtifactId: "manuscript-context",
-          sourceVariantId: "manuscript-context",
-          title: "前情 / 续写上文",
-          manuscript: manuscriptContext,
-          selectionNote: "对已有前情（开篇上文）归档",
-          chapters: [],
-        },
-        projectName: project.name,
-      });
+  const recall = await buildNovelRecallContext(project.rootPath);
+  // 复用终稿摘要器：把前情包成一份"终稿"来分块摘要，控制单次请求长度。
+  const digest = await runFinalDigest({
+    finalManuscript: {
+      sourceArtifactId: "manuscript-context",
+      sourceVariantId: "manuscript-context",
+      title: "前情 / 续写上文",
+      manuscript: manuscriptContext,
+      selectionNote: "对已有前情（开篇上文）归档",
+      chapters: [],
+    },
+    projectName: project.name,
+  });
 
-      const prompt = `Project: ${project.name}
+  const prompt = `Project: ${project.name}
 
 以下是本项目的【前情 / 续写开篇上文】。这一次它【就是要归档的对象】——请把其中已经发生、已成立的事实提炼成项目记忆，尤其是按时间顺序把关键事件写进 timeline。
 
@@ -1714,25 +1708,30 @@ ${JSON.stringify(digest, null, 2)}
 Current project memory excerpt:
 ${recallExcerpt(recall)}
 
-Generate a conservative memory patch proposal. Do not apply changes.
+Generate a conservative memory patch proposal.
 - 把前情里的关键事件按时间顺序追加到 memory/canon/timeline.md（operation: append）。
 - 稳定的世界设定 / 人物 / 文风信息，追加到对应文件。
 - 只记录前情里【确实已经发生或已成立】的事实；不要臆造、不要预测后续。
 - 不要重复 current memory 里已有的条目。`;
-      const result = await runAgent({ agent: agents.archivist, prompt, maxTokens: 2400, label: "为前情生成记忆补丁" });
+  const result = await runAgent({ agent: agents.archivist, prompt, maxTokens: 2400, label: "为前情归档记忆" });
 
-      await persistJobArtifact({
-        project,
-        kind: "memory_patch",
-        relativeDir: "memory-patches",
-        fileName: "archivist-context-memory-patch",
-        title: "Memory patch for 前情/上文",
-        content: JSON.stringify(result, null, 2),
-        agentId: "archivist",
-        stepTitle: "Generate context memory patch",
-        summary: "Archivist generated a memory patch for the prior manuscript context.",
-      });
-    },
+  // 自动应用：前情归档是"让完整故事从第一句进记忆"的初始化，无需人工闸门。
+  for (const change of result.changes) {
+    await applyMemoryPatchChange(project.rootPath, change);
+  }
+
+  // 写标记产物，记录已归档（可追溯，且保证幂等）。
+  await persistJobArtifact({
+    project,
+    kind: "context_archive",
+    relativeDir: "memory-patches",
+    fileName: "context-archive",
+    title: "Prior context archived to memory",
+    content: JSON.stringify(result, null, 2),
+    agentId: "archivist",
+    stepType: "system",
+    stepTitle: "Archive prior context",
+    summary: "Archived the prior manuscript context into memory (auto-applied).",
   });
 }
 
@@ -1762,6 +1761,8 @@ export async function runArchivistForProject(formData: FormData) {
     kind: "archivist",
     title: "生成记忆补丁",
     executor: async () => {
+      // 首次归档时先把前情写进记忆（幂等），使记忆从故事第一句起就完整。
+      await ensureContextArchived(project);
       const recall = await buildNovelRecallContext(project.rootPath);
       const manuscriptContext = await readProjectManuscriptContext(project.id);
       const digest = await runFinalDigest({ finalManuscript, projectName: project.name });
@@ -2469,6 +2470,9 @@ export async function runAutopilotForProject(formData: FormData) {
     title: `自动续写 ${chapterCount} 章`,
     executor: async () => {
       const manuscriptContext = await requireProjectManuscriptContext(project);
+
+      // 首次归档时先把前情写进记忆（幂等，自动应用），使后续规划/写作从故事第一句起就有记忆。
+      await ensureContextArchived(project);
       const recall = await buildNovelRecallContext(project.rootPath);
 
       // 0. 补齐历史成章的概要（老数据无 summary），后续复用。得到全局已成章基线。
