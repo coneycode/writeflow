@@ -213,6 +213,7 @@ Artifact 类型：
 - 字段：`plan`（全局编号章节）、`priorChapterCountAtStart`、`status`、`autoRetryCount`、`failure{globalIndex,kind}`、`checkpoints`（每章各阶段已完成产物 ID）。
 - 跳过已定稿章：`chapter.index <= latestFinalChapters().length` 则略过。
 - 阶段复用：`runChapterPipeline` 接收 `checkpoint` 与 `onStage`，每阶段（方向/大纲/草稿/润色）前若已有产物 ID 则 `reloadArtifact` 读回复用，否则跑并回调 `saveChapterCheckpointStage` 记录；读回失败降级重跑该阶段（幂等，`archiveChapterMemory` 按 chapterId strip+rewrite 亦幂等）。
+- 段级复用（更细粒度）：草稿/润色是"变体 × 多场景"的循环，每完成一场即经 `appendChapterSegment` 逐场落盘到 `checkpoint.draftSegments/editSegments`（按变体 id 分组）。续跑时 `runScribeVariant`/润色循环按 `sceneId` 跳过已完成的场，只补未完成的场——失败在变体 B 第 3 场时，变体 A 全部与 B 前 2 场都不重跑。整阶段落盘后 `clearChapterSegments` 清掉段级中间态（artifactId 已足够整段复用）。
 - `runAutopilotForProject`：初次，拆章 → 建 batch → 跑。
 - `runAutopilotFromPlanForProject`：读最新 `chapter_plan` 产物直接组装 batch 开跑，不重新拆章。
 - `resumeAutopilotJob(projectId, auto)`：从 batch 续跑；`auto` 受 `AUTOPILOT_MAX_AUTO_RETRIES`（3）约束并自增计数，手动则重置计数；`quality`/`duplicate` 不允许自动续跑。经 `POST /api/projects/{id}/resume-autopilot?auto=1` 与 server action 两条入口调用。

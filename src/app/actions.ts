@@ -16,6 +16,8 @@ import { buildNovelRecallContext } from "@/memory/recall";
 import { ATTRIBUTED_MEMORY_FILES, isAttributedTarget, stripAllMachineBlocks, stripChapterBlocks, wrapChapterBlock } from "@/memory/chapter-blocks";
 import {
   AUTOPILOT_MAX_AUTO_RETRIES,
+  appendChapterSegment,
+  clearChapterSegments,
   readBatch,
   saveChapterCheckpointStage,
   writeBatch,
@@ -800,13 +802,27 @@ async function runScribeVariant(input: {
   recall: string;
   variantId: "A" | "B";
   variantStrategy: string;
+  /** 段级续跑：已完成的场（按场景顺序），跳过不重跑。 */
+  resumeSegments?: DraftSegment[];
+  /** 每完成一场的回调（逐场落盘）。 */
+  onSegment?: (segment: DraftSegment) => Promise<void>;
+  /** 标签前缀，如 "第 4 章·"。 */
+  labelPrefix?: string;
 }) {
+  // 从已完成的场恢复：按 sceneId 匹配，只保留仍与当前大纲对应的前缀段。
+  const doneById = new Map((input.resumeSegments ?? []).map((segment) => [segment.sceneId, segment]));
   const segments: DraftSegment[] = [];
   const sceneTotal = input.beatSheet.scenes.length;
+  const prefix = input.labelPrefix ?? "";
 
   for (const [sceneIndex, scene] of input.beatSheet.scenes.entries()) {
     const previousContext = segments.map((segment) => segment.manuscript).join("\n\n");
     const nextScene = input.beatSheet.scenes[sceneIndex + 1];
+    const reused = doneById.get(scene.id);
+    if (reused) {
+      segments.push(reused);
+      continue;
+    }
     const segment = await runScribeSegment({
       beatSheet: input.beatSheet,
       manuscriptContext: input.manuscriptContext,
@@ -817,9 +833,12 @@ async function runScribeVariant(input: {
       scene,
       variantId: input.variantId,
       variantStrategy: input.variantStrategy,
-      label: `变体 ${input.variantId} · 第 ${sceneIndex + 1} 场 / 共 ${sceneTotal} 场：${scene.title}`,
+      label: `${prefix}变体 ${input.variantId} · 第 ${sceneIndex + 1} 场 / 共 ${sceneTotal} 场：${scene.title}`,
     });
     segments.push(segment);
+    if (input.onSegment) {
+      await input.onSegment(segment);
+    }
   }
 
   return {
@@ -2610,10 +2629,17 @@ async function runChapterPipeline(input: {
   checkpoint?: ChapterCheckpoint;
   /** 阶段完成回调：把该阶段 artifactId 写入 batch checkpoint。 */
   onStage?: (patch: Partial<Omit<ChapterCheckpoint, "globalIndex">>) => Promise<void>;
+  /** 段级回调：草稿/润色每完成一场就落盘（用于更细粒度续跑）。 */
+  onSegment?: (phase: "draft" | "edit", variantId: string, segment: DraftSegment | EditedSegment) => Promise<void>;
+  /** 阶段整体落盘后清掉段级中间态。 */
+  onClearSegments?: (phase: "draft" | "edit") => Promise<void>;
 }): Promise<ChapterPipelineResult> {
   const { project, planned, checkpoint, onStage } = input;
   const tag = `第 ${input.globalIndex} 章`;
   const saveStage = onStage ?? (async () => {});
+  const onSegmentDraft = input.onSegment ? (variantId: string, segment: DraftSegment) => input.onSegment!("draft", variantId, segment) : undefined;
+  const onSegmentEdit = input.onSegment ? (variantId: string, segment: EditedSegment) => input.onSegment!("edit", variantId, segment) : undefined;
+  const clearSegments = input.onClearSegments ?? (async () => {});
   const chapterBrief = [planned.title, planned.brief, ...(planned.focus ?? [])].filter(Boolean).join("\n");
 
   // 每章都重新读取上文（含已成章全文）与记忆（前章已自动写回）。
@@ -2748,6 +2774,9 @@ Create a chapter beat sheet for this selected direction. 大纲的每一场都�
           recall,
           variantId: request.id,
           variantStrategy: request.strategy,
+          resumeSegments: checkpoint?.draftSegments?.[request.id],
+          onSegment: onSegmentDraft ? (segment) => onSegmentDraft(request.id, segment) : undefined,
+          labelPrefix: `${tag}·`,
         }),
       );
     }
@@ -2769,6 +2798,7 @@ Create a chapter beat sheet for this selected direction. 大纲的每一场都�
       parentArtifactId: outlineArtifactId,
     });
     await saveStage({ draftArtifactId });
+    await clearSegments("draft");
   }
 
   // 4. 逐场润色，组装 EditSet。续跑时若已有产物则读回复用。
@@ -2781,9 +2811,15 @@ Create a chapter beat sheet for this selected direction. 大纲的每一场都�
   } else {
   const editedVariants: EditedVariant[] = [];
   for (const variant of draftSet.variants) {
+    const doneEditById = new Map((checkpoint?.editSegments?.[variant.id] ?? []).map((seg) => [seg.sceneId, seg]));
     const editedSegments: EditedSegment[] = [];
     const sceneTotal = variant.segments.length;
     for (const [segmentIndex, segment] of variant.segments.entries()) {
+      const reusedSeg = doneEditById.get(segment.sceneId);
+      if (reusedSeg) {
+        editedSegments.push(reusedSeg);
+        continue;
+      }
       const previousContext = editedSegments.map((item) => item.manuscript).join("\n\n");
       const nextSegment = variant.segments[segmentIndex + 1];
       const editedSegment = await runEditorSegment({
@@ -2798,6 +2834,9 @@ Create a chapter beat sheet for this selected direction. 大纲的每一场都�
         label: `${tag}·润色 变体 ${variant.id} · 第 ${segmentIndex + 1} 场 / 共 ${sceneTotal} 场`,
       });
       editedSegments.push(editedSegment);
+      if (onSegmentEdit) {
+        await onSegmentEdit(variant.id, editedSegment);
+      }
     }
     editedVariants.push({
       id: `${variant.id}-edited`,
@@ -2827,6 +2866,7 @@ Create a chapter beat sheet for this selected direction. 大纲的每一场都�
     parentArtifactId: draftArtifactId,
   });
     await saveStage({ editArtifactId });
+    await clearSegments("edit");
   }
 
   // 5. 审稿循环（非 pass 自动修订重审，最多 N 轮）。
@@ -2907,6 +2947,8 @@ async function runAutopilotBatch(
         nextChapter: planned[chapterIndex + 1] ?? null,
         checkpoint: batch.checkpoints[chapter.index],
         onStage: (patch) => saveChapterCheckpointStage(project.id, chapter.index, patch),
+        onSegment: (phase, variantId, segment) => appendChapterSegment(project.id, chapter.index, phase, variantId, segment),
+        onClearSegments: (phase) => clearChapterSegments(project.id, chapter.index, phase),
       });
 
       if (result.status === "quality_failed") {

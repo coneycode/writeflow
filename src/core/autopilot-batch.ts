@@ -3,6 +3,8 @@ import path from "node:path";
 
 import { projectRoot } from "@/lib/paths";
 import type { PlannedChapter } from "@/schemas/chapter-plan";
+import type { DraftSegment } from "@/schemas/draft";
+import type { EditedSegment } from "@/schemas/edit";
 
 /** 自动续跑的自动重试上限（间隔 60s，仅意外失败）。 */
 export const AUTOPILOT_MAX_AUTO_RETRIES = 3;
@@ -14,6 +16,13 @@ export type ChapterCheckpoint = {
   outlineArtifactId?: string;
   draftArtifactId?: string;
   editArtifactId?: string;
+  /**
+   * 段级断点：整阶段落盘前，逐场累积已完成的 segment（key = 变体 id）。
+   * 草稿/润色都是"变体 × 多场景"的循环，逐场落盘后失败续跑只补未完成的场，
+   * 不重跑已生成的场景与变体。整阶段完成后会被清空（artifactId 已足够复用）。
+   */
+  draftSegments?: Record<string, DraftSegment[]>;
+  editSegments?: Record<string, EditedSegment[]>;
   status: "pending" | "completed" | "failed";
 };
 
@@ -76,5 +85,57 @@ export async function saveChapterCheckpointStage(
   }
   const existing: ChapterCheckpoint = batch.checkpoints[globalIndex] ?? { globalIndex, status: "pending" };
   batch.checkpoints[globalIndex] = { ...existing, ...patch, globalIndex };
+  await writeBatch(projectId, batch);
+}
+
+/**
+ * 逐场落盘：把某变体新完成的一个 segment 追加到该章的段级断点。
+ * `phase` 区分草稿/润色。续跑时据此跳过已完成的场，只补未完成的。
+ */
+export async function appendChapterSegment(
+  projectId: string,
+  globalIndex: number,
+  phase: "draft" | "edit",
+  variantId: string,
+  segment: DraftSegment | EditedSegment,
+): Promise<void> {
+  const batch = await readBatch(projectId);
+  if (!batch) {
+    return;
+  }
+  const checkpoint: ChapterCheckpoint = batch.checkpoints[globalIndex] ?? { globalIndex, status: "pending" };
+  if (phase === "draft") {
+    const map = { ...(checkpoint.draftSegments ?? {}) };
+    map[variantId] = [...(map[variantId] ?? []), segment as DraftSegment];
+    checkpoint.draftSegments = map;
+  } else {
+    const map = { ...(checkpoint.editSegments ?? {}) };
+    map[variantId] = [...(map[variantId] ?? []), segment as EditedSegment];
+    checkpoint.editSegments = map;
+  }
+  batch.checkpoints[globalIndex] = { ...checkpoint, globalIndex };
+  await writeBatch(projectId, batch);
+}
+
+/** 阶段整体落盘后清掉段级中间态（artifactId 已能整段复用），保持 batch 精简。 */
+export async function clearChapterSegments(
+  projectId: string,
+  globalIndex: number,
+  phase: "draft" | "edit",
+): Promise<void> {
+  const batch = await readBatch(projectId);
+  if (!batch) {
+    return;
+  }
+  const checkpoint = batch.checkpoints[globalIndex];
+  if (!checkpoint) {
+    return;
+  }
+  if (phase === "draft") {
+    delete checkpoint.draftSegments;
+  } else {
+    delete checkpoint.editSegments;
+  }
+  batch.checkpoints[globalIndex] = checkpoint;
   await writeBatch(projectId, batch);
 }
