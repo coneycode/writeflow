@@ -4,7 +4,19 @@ import path from "node:path";
 import { projectRoot } from "@/lib/paths";
 import type { PlannedChapter } from "@/schemas/chapter-plan";
 import type { DraftSegment } from "@/schemas/draft";
-import type { EditedSegment } from "@/schemas/edit";
+import type { EditedSegment, EditedVariant } from "@/schemas/edit";
+import type { VariantReview } from "@/schemas/review";
+
+/** 审稿修订循环的断点：记录当前轮次与本轮已完成的逐变体审稿/修订，供续跑复用。 */
+export type ReviewProgress = {
+  round: number;
+  /** 本轮被审 EditSet 的 artifactId（round>0 为修订版）。 */
+  editArtifactId: string;
+  /** 本轮已完成的逐变体审稿（key=variantId）。 */
+  variantReviews?: Record<string, VariantReview>;
+  /** 本轮已完成的逐变体修订（key=variantId）。 */
+  revisedVariants?: Record<string, EditedVariant>;
+};
 
 /** 自动续跑的自动重试上限（间隔 60s，仅意外失败）。 */
 export const AUTOPILOT_MAX_AUTO_RETRIES = 3;
@@ -23,6 +35,12 @@ export type ChapterCheckpoint = {
    */
   draftSegments?: Record<string, DraftSegment[]>;
   editSegments?: Record<string, EditedSegment[]>;
+  /** 审稿修订循环进度（续跑时从此轮/此变体接着走，不重审重修）。 */
+  reviewProgress?: ReviewProgress;
+  /** 本章已定稿并写入 selected_final 的章节 id（用于续跑补归档时定位正文）。 */
+  finalizedChapterId?: string;
+  /** 本章记忆是否已归档（定稿与归档之间中断时，续跑据此补归档）。 */
+  archivedMemory?: boolean;
   status: "pending" | "completed" | "failed";
 };
 
