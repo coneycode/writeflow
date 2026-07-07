@@ -68,3 +68,52 @@ export function stripAllMachineBlocks(fileText: string): string {
   const cut = Math.min(...markers);
   return fileText.slice(0, cut).trimEnd() + "\n";
 }
+
+/**
+ * 按权威 id 序列重排文件里的所有章节块，保证记忆顺序 = 当前作品的真实章节顺序。
+ * - 保留首个块之前的【基底】（标题/表头/手写内容）；
+ * - 块按 orderedIds 顺序排列；同 id 多次出现只保留最后一份（去重）；
+ * - 不在 orderedIds 里的【孤儿块】（如已删章残留）统一归到末尾。
+ * 不依赖任何写入时冻结的序号——顺序始终由传入的权威序列（当前章节列表）决定，
+ * 因此删章 / autopilot 全局重映射后也不会错位。
+ */
+export function reorderChapterBlocks(fileText: string, orderedIds: string[]): string {
+  const blockRe = /<!-- wf:chapter (\S+) start -->[\s\S]*?<!-- wf:chapter \1 end -->/g;
+  const blocks = new Map<string, string>();
+  let firstIndex = -1;
+  let match: RegExpExecArray | null;
+  while ((match = blockRe.exec(fileText)) !== null) {
+    if (firstIndex < 0) {
+      firstIndex = match.index;
+    }
+    // 同 id 多次出现：后者覆盖，保留最后一份（去重）。
+    blocks.set(match[1], match[0]);
+  }
+  if (firstIndex < 0) {
+    return fileText; // 没有任何块，保持原样。
+  }
+  const base = fileText.slice(0, firstIndex).replace(/\s+$/, "");
+  const ordered: string[] = [];
+  for (const id of orderedIds) {
+    const block = blocks.get(id);
+    if (block) {
+      ordered.push(block);
+      blocks.delete(id);
+    }
+  }
+  const orphans = [...blocks.values()]; // 不在权威序列里的块，归末尾。
+  return [base, ...ordered, ...orphans].filter(Boolean).join("\n\n") + "\n";
+}
+
+/**
+ * 移除内容为空的旧残留标记（`<!-- Writeflow memory patch: ... -->` 后面直接跟另一个标记
+ * 或文件尾、中间没有实质内容）。清理历史遗留的空标记块，不影响有内容的块。
+ */
+export function stripEmptyPatchMarkers(fileText: string): string {
+  // 空标记：一个 patch 标记后，只有空白，直到下一个标记或文件结束。
+  const cleaned = fileText.replace(
+    /<!-- Writeflow memory patch:[^>]*-->\s*(?=(<!--|$))/g,
+    "",
+  );
+  return cleaned.replace(/\n{3,}/g, "\n\n");
+}

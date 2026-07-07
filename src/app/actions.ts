@@ -13,7 +13,7 @@ import { overwriteArtifact, readJsonArtifact, writeArtifact } from "@/core/artif
 import { ensureDirectory, projectRoot, slugifyProjectName } from "@/lib/paths";
 import { writeNovelProjectTemplate } from "@/memory/templates";
 import { buildNovelRecallContext } from "@/memory/recall";
-import { ATTRIBUTED_MEMORY_FILES, isAttributedTarget, stripAllMachineBlocks, stripChapterBlocks, wrapChapterBlock } from "@/memory/chapter-blocks";
+import { ATTRIBUTED_MEMORY_FILES, isAttributedTarget, reorderChapterBlocks, stripAllMachineBlocks, stripChapterBlocks, stripEmptyPatchMarkers, wrapChapterBlock } from "@/memory/chapter-blocks";
 import {
   AUTOPILOT_MAX_AUTO_RETRIES,
   appendChapterSegment,
@@ -99,34 +99,57 @@ async function applyMemoryPatchChange(rootPath: string, change: MemoryPatch["cha
   throw new Error(`Unsupported memory patch operation: ${change.operation}`);
 }
 
+/** 前情块的稳定 id（排在所有章节之前）。 */
+const PRIOR_CONTEXT_BLOCK_ID = "prior-context";
+/** 手动审批补丁块的稳定 id（排在所有章节之后）。 */
+const MANUAL_BLOCK_ID = "manual";
+
+/** 列出项目当前所有归属型记忆文件（固定表 + characters/*.md）。 */
+async function listAttributedMemoryFiles(rootPath: string): Promise<string[]> {
+  const targets = new Set<string>(ATTRIBUTED_MEMORY_FILES);
+  try {
+    const characterDir = path.join(rootPath, "memory/canon/characters");
+    for (const file of await fs.readdir(characterDir)) {
+      if (file.endsWith(".md")) {
+        targets.add(`memory/canon/characters/${file}`);
+      }
+    }
+  } catch {
+    // 无 characters 目录：忽略。
+  }
+  return [...targets];
+}
+
 /**
- * 把一份记忆补丁按"章节归属"写入：
- * - 归属型文件（timeline/threads/world/characters）：先删掉该章的旧块，再把本章内容包成带标记的新块追加，
- *   使得同一章重复归档（如编辑后重写）只会替换、不会堆叠。
- * - 全局型文件（state/voice/taboo）：仅当 includeGlobal 为真时，走原始 append/update 语义。
- * 返回本次实际写入的文件相对路径列表（用于日志/追溯）。
+ * 构造记忆块的权威排序序列：前情 → 各章（按终稿顺序）→ 手动补丁。
+ * 顺序始终来自当前终稿的真实章节序，不依赖任何写入时冻结的序号。
+ */
+async function authoritativeBlockOrder(project: NonNullable<Awaited<ReturnType<typeof getProject>>>): Promise<string[]> {
+  const chapters = await latestFinalChapters(project);
+  return [PRIOR_CONTEXT_BLOCK_ID, ...chapters.map((chapter) => chapter.id), MANUAL_BLOCK_ID];
+}
+
+/**
+ * 把一份记忆补丁按"章节归属"写入，并在写后按权威序【重排】整个文件：
+ * - 归属型文件（timeline/threads/world/characters）：先删掉本 id 的旧块（去重），再把内容包成带标记的新块追加，
+ *   最后按 orderedIds 重排——保证记忆顺序 = 当前作品真实章节顺序。
+ * - 全局型文件（state/voice/taboo）：仅当 includeGlobal 为真时，走原始 append/update 语义（不参与块重排）。
+ * 返回本次实际写入的文件相对路径列表。
  */
 async function applyChapterMemoryPatch(input: {
   rootPath: string;
   chapterId: string;
   patch: MemoryPatch;
   includeGlobal: boolean;
+  /** 权威排序序列（前情→各章→手动）；缺省则不重排，仅去重+写入。 */
+  orderedIds?: string[];
 }) {
-  const { rootPath, chapterId, patch, includeGlobal } = input;
+  const { rootPath, chapterId, patch, includeGlobal, orderedIds } = input;
 
-  // 1. 先从【所有现存的归属型文件】删除该章旧块——包括本次 patch 未涉及的文件，
-  //    否则改章后若不再写某文件，旧块会残留、与新正文冲突。
-  const attributedTargets = new Set<string>(ATTRIBUTED_MEMORY_FILES);
-  try {
-    const characterDir = path.join(rootPath, "memory/canon/characters");
-    for (const file of await fs.readdir(characterDir)) {
-      if (file.endsWith(".md")) {
-        attributedTargets.add(`memory/canon/characters/${file}`);
-      }
-    }
-  } catch {
-    // 无 characters 目录：忽略。
-  }
+  const attributedTargets = await listAttributedMemoryFiles(rootPath);
+
+  // 1. 先从【所有现存的归属型文件】删除本 id 旧块——包括本次 patch 未涉及的文件，
+  //    否则改章后若不再写某文件，旧块会残留、与新内容冲突。
   for (const normalized of attributedTargets) {
     const { resolved } = resolveMemoryTarget(rootPath, normalized);
     const current = await readMemoryFileRaw(resolved);
@@ -146,6 +169,17 @@ async function applyChapterMemoryPatch(input: {
     } else if (includeGlobal) {
       await applyMemoryPatchChange(rootPath, change);
       touched.push(normalized);
+    }
+  }
+
+  // 3. 按权威序重排所有归属型文件，并顺带清空历史空残留标记。
+  if (orderedIds) {
+    for (const normalized of attributedTargets) {
+      const { resolved } = resolveMemoryTarget(rootPath, normalized);
+      const current = await readMemoryFileRaw(resolved);
+      if (current) {
+        await fs.writeFile(resolved, stripEmptyPatchMarkers(reorderChapterBlocks(current, orderedIds)), "utf8");
+      }
     }
   }
   return touched;
@@ -1775,6 +1809,16 @@ export async function removeFinalChapterForProject(formData: FormData) {
     createdAt: now,
   });
 
+  // 删除该章在归属型记忆文件里的块，避免留下孤儿块（并重排剩余块）。
+  for (const normalized of await listAttributedMemoryFiles(project.rootPath)) {
+    const { resolved } = resolveMemoryTarget(project.rootPath, normalized);
+    const current = await readMemoryFileRaw(resolved);
+    if (current) {
+      const orderedIds = [PRIOR_CONTEXT_BLOCK_ID, ...remaining.map((chapter) => chapter.id), MANUAL_BLOCK_ID];
+      await fs.writeFile(resolved, reorderChapterBlocks(stripChapterBlocks(current, chapterId), orderedIds), "utf8");
+    }
+  }
+
   await db.update(schema.projects).set({ updatedAt: now }).where(eq(schema.projects.id, project.id));
   revalidatePath(`/projects/${project.id}`);
 }
@@ -2070,6 +2114,7 @@ Generate a conservative memory patch proposal.
     chapterId: chapter.id,
     patch,
     includeGlobal: input.includeGlobal,
+    orderedIds: await authoritativeBlockOrder(project),
   });
 
   await persistJobArtifact({
@@ -2138,9 +2183,14 @@ Generate a conservative memory patch proposal.
   const result = await runAgent({ agent: agents.archivist, prompt, maxTokens: 2400, label: "为前情归档记忆" });
 
   // 自动应用：前情归档是"让完整故事从第一句进记忆"的初始化，无需人工闸门。
-  for (const change of result.changes) {
-    await applyMemoryPatchChange(project.rootPath, change);
-  }
+  // 走块写入（id=prior-context）：去重（重跑不叠加）+ 排到所有章节之前。
+  await applyChapterMemoryPatch({
+    rootPath: project.rootPath,
+    chapterId: PRIOR_CONTEXT_BLOCK_ID,
+    patch: result,
+    includeGlobal: true,
+    orderedIds: await authoritativeBlockOrder(project),
+  });
 
   // 写标记产物，记录已归档（可追溯，且保证幂等）。
   await persistJobArtifact({
@@ -2329,10 +2379,18 @@ export async function applyMemoryPatchForProject(formData: FormData) {
     throw new Error("Unable to read memory patch artifact.");
   }
 
-  const applied = [];
-  for (const change of patch.changes) {
-    applied.push(await applyMemoryPatchChange(project.rootPath, change));
-  }
+  // 走块写入：归属型 change 进一个【本次批准专属】的 manual 块（id 唯一，多次批准互不覆盖、
+  //   全部排在章节之后），全局型 change（state/voice/taboo）照常 append/update。
+  //   不再裸 append 到文件尾——避免重新引入无序、无去重的旧问题。
+  const manualBlockId = `${MANUAL_BLOCK_ID}:${patchArtifact.id}`;
+  const orderedIds = [...(await authoritativeBlockOrder(project)), manualBlockId];
+  const applied = await applyChapterMemoryPatch({
+    rootPath: project.rootPath,
+    chapterId: manualBlockId,
+    patch,
+    includeGlobal: true,
+    orderedIds,
+  });
 
   const appliedRecord = {
     sourcePatchArtifactId: patchArtifact.id,
