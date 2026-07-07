@@ -1,7 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+/** 前瞻记忆（创作纲领）：始终排在 recall 最前，且截断时全量保留（见 recallExcerpt）。 */
+export const BLUEPRINT_RECALL_FILE = "memory/plan/blueprint.md";
+
 const recallFiles = [
+  BLUEPRINT_RECALL_FILE,
   "memory/progress/state.md",
   "memory/progress/open_threads.md",
   "memory/canon/world.md",

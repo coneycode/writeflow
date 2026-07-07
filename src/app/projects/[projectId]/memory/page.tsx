@@ -4,10 +4,12 @@ import Link from "next/link";
 
 import { notFound } from "next/navigation";
 
-import { getProject, updateProjectMemoryFile } from "@/app/actions";
+import { generateBlueprintForProject, getProject, updateProjectMemoryFile } from "@/app/actions";
 import { MemoryFileCard } from "@/components/workspace/memory-file-card";
+import { BlueprintGenerateForm } from "@/components/workspace/blueprint-generate-form";
 
 const memoryFiles = [
+  ["创作纲领", "memory/plan/blueprint.md", "写正文之前定的意图与方向：整体目标、伏笔规划、人物弧线、关键设定、结局基调。"],
   ["当前状态", "memory/progress/state.md", "记录故事当前进展，以及下一章需要推进什么。"],
   ["开放线索", "memory/progress/open_threads.md", "未解决线索、叙事承诺和计划回收点。"],
   ["世界设定", "memory/canon/world.md", "稳定的世界规则、地点、限制和 canon 事实。"],
@@ -55,7 +57,11 @@ export default async function MemoryPage({ params }: { params: Promise<{ project
           </p>
         </header>
 
-        <section className="mt-6 grid gap-4 md:grid-cols-2">
+        <section className="mt-6">
+          <BlueprintGenerateForm projectId={project.id} generateAction={generateBlueprintForProject} />
+        </section>
+
+        <section className="mt-4 grid gap-4 md:grid-cols-2">
           {files.map((file) => (
             <MemoryFileCard
               key={file.relativePath}

@@ -36,9 +36,11 @@ import { finalChapters } from "@/schemas/final-manuscript";
 import type { FinalChapter, FinalManuscript } from "@/schemas/final-manuscript";
 import { memoryPatchSchema } from "@/schemas/memory-patch";
 import type { FinalManuscriptDigest, MemoryPatch } from "@/schemas/memory-patch";
+import type { Blueprint } from "@/schemas/blueprint";
 
 
 const allowedMemoryTargets = [
+  "memory/plan/blueprint.md",
   "memory/canon/world.md",
   "memory/canon/timeline.md",
   "memory/progress/state.md",
@@ -1136,7 +1138,24 @@ function manuscriptContextExcerpt(value: string) {
   return tailText(value, 2400);
 }
 
+/**
+ * recall 摘录：把前瞻记忆（创作纲领 blueprint）整段【全量保留】排在最前，
+ * 其余记忆再走原截断——避免纲领被首尾截断挖掉中段（它是写作的意图源，必须完整到达模型）。
+ * recall 各段格式为 `## <relativePath>\n<content>`，blueprint 段以 "## memory/plan/blueprint.md" 开头。
+ */
 function recallExcerpt(value: string) {
+  const marker = "## memory/plan/blueprint.md";
+  if (value.startsWith(marker)) {
+    // 边界必须找【下一个文件段】"\n\n## memory/"——不能用泛化的 "\n\n## "，
+    // 否则会被 blueprint 正文内部的二级标题（## 整体目标 等）误当成段界，导致纲领被拦腰截断。
+    const nextSection = value.indexOf("\n\n## memory/", marker.length);
+    if (nextSection === -1) {
+      return value; // 只有 blueprint，全量返回。
+    }
+    const blueprint = value.slice(0, nextSection);
+    const rest = value.slice(nextSection + 2); // 跳过分隔的 "\n\n"
+    return `${blueprint}\n\n${excerptText(rest, 3600)}`;
+  }
   return excerptText(value, 3600);
 }
 
@@ -2130,6 +2149,90 @@ Generate a conservative memory patch proposal.
   });
 
   return patch;
+}
+
+// ===== 前瞻记忆：创作纲领（blueprint） =====
+
+const BLUEPRINT_PATH = "memory/plan/blueprint.md";
+
+/** 把结构化 blueprint 渲染成固定五小节的 Markdown（与模板小节标题一致）。 */
+function renderBlueprintMarkdown(blueprint: Blueprint): string {
+  const bullets = (items: string[]) => (items.length ? items.map((item) => `- ${item.trim()}`).join("\n") : "-");
+  const foreshadowing = blueprint.foreshadowing.length
+    ? blueprint.foreshadowing.map((item) => `- ${item.intent.trim()}`).join("\n")
+    : "-";
+  const arcs = blueprint.characterArcs.length
+    ? blueprint.characterArcs.map((item) => `- ${item.name.trim()}：${item.arc.trim()}`).join("\n")
+    : "-";
+  return `# 创作纲领
+
+写正文之前定下的意图与方向（可手动编辑，或用「生成创作纲领」自动起草）。
+
+## 整体目标
+
+${blueprint.overallGoal.trim() || "-"}
+
+## 伏笔规划
+
+${foreshadowing}
+
+## 人物弧线
+
+${arcs}
+
+## 关键设定
+
+${bullets(blueprint.keySettings)}
+
+## 结局基调
+
+${blueprint.endingTone.trim() || "-"}
+`;
+}
+
+/**
+ * 混合生成创作纲领：读种子 + 上文 + 现有记忆，跑 blueprintPlannerAgent 出草案，
+ * 渲染成 blueprint.md（覆盖写）。生成后用户可在记忆页直接编辑（单一事实源，不另存 artifact）。
+ */
+export async function generateBlueprintForProject(formData: FormData) {
+  "use server";
+
+  const projectId = String(formData.get("projectId") ?? "");
+  const seed = String(formData.get("seed") ?? "").trim();
+  const project = await getProject(projectId);
+  if (!project) {
+    throw new Error("Project not found.");
+  }
+
+  await startJob({
+    projectId: project.id,
+    kind: "archivist",
+    title: "生成创作纲领",
+    executor: async () => {
+      const manuscriptContext = await readProjectManuscriptContext(project.id);
+      const recall = await buildNovelRecallContext(project.rootPath);
+      const prompt = `Project: ${project.name}
+
+用户种子（创作意图/想法，可能简略）:
+${seed || "（用户未提供额外种子，请基于续写上文与现有记忆起草）"}
+
+续写上文末尾:
+${manuscriptContextExcerpt(manuscriptContext) || "（暂无上文）"}
+
+现有项目记忆:
+${recallExcerpt(recall)}
+
+请起草一份【创作纲领】草案：整体目标、伏笔规划（只写意图、不订回收章）、人物弧线、关键设定、结局基调。`;
+      const blueprint = await runAgent({ agent: agents.blueprintPlanner, prompt, maxTokens: 2400, label: "生成创作纲领" });
+
+      const { resolved } = resolveMemoryTarget(project.rootPath, BLUEPRINT_PATH);
+      await fs.mkdir(path.dirname(resolved), { recursive: true });
+      await fs.writeFile(resolved, renderBlueprintMarkdown(blueprint), "utf8");
+
+      revalidatePath(`/projects/${project.id}`);
+      revalidatePath(`/projects/${project.id}/memory`);
+    },
+  });
 }
 
 /**

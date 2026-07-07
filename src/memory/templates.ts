@@ -63,6 +63,23 @@ export const novelMemoryTemplates: MemoryTemplateFile[] = [
 `,
   },
   {
+    path: "memory/plan/blueprint.md",
+    content: `# 创作纲领
+
+写正文之前定下的意图与方向（可手动编辑，或用「生成创作纲领」自动起草）。
+
+## 整体目标
+
+## 伏笔规划
+
+## 人物弧线
+
+## 关键设定
+
+## 结局基调
+`,
+  },
+  {
     path: "memory/style/voice.md",
     content: `# Voice Profile
 

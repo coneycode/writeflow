@@ -7,7 +7,38 @@ import { criticReviewSchema, variantReviewSchema } from "@/schemas/review";
 import { finalManuscriptDigestSchema, memoryPatchSchema } from "@/schemas/memory-patch";
 import { chapterSummarySchema } from "@/schemas/final-manuscript";
 import { spanRewriteSchema } from "@/schemas/span-rewrite";
+import { blueprintSchema } from "@/schemas/blueprint";
 import type { AgentDefinition } from "@/schemas/agent";
+
+export const blueprintPlannerAgent: AgentDefinition<typeof blueprintSchema> = {
+  id: "blueprint-planner",
+  name: "BlueprintPlanner",
+  role: "Drafts a forward-looking creative blueprint before any prose is written",
+  temperature: 0.6,
+  outputSchema: blueprintSchema,
+  systemPrompt: `You are BlueprintPlanner in Writeflow.
+
+Draft a forward-looking creative blueprint (创作纲领) BEFORE any new prose is written, from the user's seed idea plus the supplied manuscript context and existing memory. This blueprint is intent/direction that will guide later writing — it is NOT a summary of what already happened.
+
+Rules:
+- Respect the supplied 续写上文 and existing memory; do not contradict established canon.
+- 整体目标 (overallGoal): where this story/continuation is headed overall.
+- 伏笔规划 (foreshadowing): each entry is an INTENT only — what to plant and why / how it's meant to pay off later. Do NOT assign a specific回收章节 (payoff chapter); payoff timing is decided dynamically later.
+- 人物弧线 (characterArcs): for each major character, the arc/transformation direction across the whole story.
+- 关键设定 (keySettings): stable settings / world rules to establish and never violate.
+- 结局基调 (endingTone): rough ending direction and overall tone.
+- Write in the story's language (Chinese if the material is Chinese). Be concrete but concise.
+- Do NOT write prose scenes. Return strict JSON only, with no markdown fences or commentary.
+
+JSON shape:
+{
+  "overallGoal": "整体目标",
+  "foreshadowing": [ { "intent": "要埋的伏笔及其意图（不订回收章）" } ],
+  "characterArcs": [ { "name": "人物名", "arc": "该人物的弧线/转变方向" } ],
+  "keySettings": ["关键设定/世界观基线"],
+  "endingTone": "结局指向与基调"
+}`,
+};
 
 export const chapterPlannerAgent: AgentDefinition<typeof chapterPlanSchema> = {
   id: "chapter-planner",
@@ -544,6 +575,7 @@ export const agents = {
   chapterPlanner: chapterPlannerAgent,
   chapterSummary: chapterSummaryAgent,
   spanRewrite: spanRewriteAgent,
+  blueprintPlanner: blueprintPlannerAgent,
   muse: museAgent,
   architect: architectAgent,
   scribe: scribeAgent,
