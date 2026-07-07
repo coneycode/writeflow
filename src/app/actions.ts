@@ -288,16 +288,33 @@ export async function readProjectManuscriptContext(projectId: string) {
   }
 }
 
-function combineManuscriptContext(input: { chapters: FinalChapter[]; originalContext: string }) {
-  return [
-    input.originalContext.trim(),
-    input.chapters
-      .map((chapter, index) => `# 第 ${index + 1} 章：${chapter.title}\n\n${chapter.manuscript.trim()}`)
-      .filter(Boolean)
-      .join("\n\n"),
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+/**
+ * 续写上下文只被用来取【尾部】喂 prompt（消费方一律 tailText/Excerpt，最大 2400 字）。
+ * 因此无需把整本书拼成一个巨型字符串——从最后一章往前累计到此预算即可，
+ * 尾部字节与拼全书完全一致，但避免二十章后每步拼接 30–40 万字的无用开销。
+ * 预算取 8000，远大于最大消费（2400），为将来的消费方留足余量。
+ */
+const CONTEXT_TAIL_BUDGET = 8000;
+
+function combineManuscriptContextTail(input: { chapters: FinalChapter[]; originalContext: string }) {
+  const parts: string[] = [];
+  let total = 0;
+  for (let index = input.chapters.length - 1; index >= 0; index -= 1) {
+    const chapter = input.chapters[index];
+    const block = `# 第 ${index + 1} 章：${chapter.title}\n\n${chapter.manuscript.trim()}`;
+    parts.unshift(block);
+    total += block.length + 2; // 计入 "\n\n" 连接符
+    if (total >= CONTEXT_TAIL_BUDGET) {
+      // 已够尾部预算，无需再拼更早的章或前情（它们不会出现在尾部）。
+      return parts.join("\n\n");
+    }
+  }
+  // 所有章加起来仍不足预算：把前情也拼上（与旧行为一致）。
+  const originalContext = input.originalContext.trim();
+  if (originalContext) {
+    parts.unshift(originalContext);
+  }
+  return parts.filter(Boolean).join("\n\n");
 }
 
 async function latestFinalChapters(project: NonNullable<Awaited<ReturnType<typeof getProject>>>) {
@@ -327,10 +344,14 @@ async function latestFinalChapters(project: NonNullable<Awaited<ReturnType<typeo
       ];
 }
 
+/**
+ * 供续写各阶段承接的"上文"。消费方只取尾部（≤2400 字），故只拼到尾部预算，
+ * 不再把整本书拼成巨型字符串——尾部内容与拼全书一致，但省掉章数增长带来的无用开销。
+ */
 async function readProjectFullManuscriptContext(project: NonNullable<Awaited<ReturnType<typeof getProject>>>) {
   const originalContext = await readProjectManuscriptContext(project.id);
   const chapters = await latestFinalChapters(project);
-  return combineManuscriptContext({ chapters, originalContext });
+  return combineManuscriptContextTail({ chapters, originalContext });
 }
 
 async function requireProjectManuscriptContext(project: NonNullable<Awaited<ReturnType<typeof getProject>>>) {
