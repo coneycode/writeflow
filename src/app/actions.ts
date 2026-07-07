@@ -1247,6 +1247,32 @@ function reviewCandidates(source: DraftSet | EditSet) {
   }));
 }
 
+/** 单变体审稿超过此长度才走分段兜底；正常一章远低于此，走单次审稿。 */
+const CRITIC_SINGLE_PASS_LIMIT = 28000;
+
+/**
+ * 按段落边界（双换行）把超长正文聚成若干段，每段不超过 maxCharacters。
+ * 只在句子/场景之间断开，绝不在句中硬切——避免制造"开头残缺"的假接缝。
+ */
+function splitOnParagraphBoundary(text: string, maxCharacters: number) {
+  const paragraphs = text.split(/\n{2,}/);
+  const groups: string[] = [];
+  let current = "";
+  for (const paragraph of paragraphs) {
+    const candidate = current ? `${current}\n\n${paragraph}` : paragraph;
+    if (candidate.length > maxCharacters && current) {
+      groups.push(current);
+      current = paragraph;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) {
+    groups.push(current);
+  }
+  return groups.length > 0 ? groups : [text];
+}
+
 async function runCriticVariantChunk(input: {
   artifactKind: string;
   chunk: string;
@@ -1258,21 +1284,33 @@ async function runCriticVariantChunk(input: {
   sourceTitle: string;
   variant: ReturnType<typeof reviewCandidates>[number];
 }) {
+  const isFirst = input.chunkIndex === 0;
+  const single = input.chunkTotal === 1;
+  // 承接语义：只有【章首】需要承接续写上文；章内后续段落承接的是本章上一段，
+  // 不得因场景切换或时间推进判为"未承接/开头残缺/时间线错位"。
+  const continuityNote = single
+    ? `承接检查：本章开头必须自然承接下面的“续写上文末尾”。章内不同场景之间的推进、时间流逝属正常叙事，不是缺陷。`
+    : isFirst
+      ? `这是本章的【开头段】：必须自然承接下面的“续写上文末尾”。`
+      : `这是本章的【第 ${input.chunkIndex + 1} 段 / 共 ${input.chunkTotal} 段】，承接的是本章上一段的结尾，【不是】续写上文；不要因为它不直接衔接“续写上文末尾”、或看起来像从中间开始，而判为“开头残缺/未承接/截断”。只评估本段自身的 canon、时间线、人物、因果与文风问题。`;
+
   const prompt = `Project: ${input.projectName}
 
-续写上文末尾（审稿必须检查是否承接此上文）:
+续写上文末尾（本章开头应承接此上文；仅章首需要衔接它）:
 ${manuscriptContextExcerpt(input.manuscriptContext)}
 
 Review source: ${input.sourceTitle}
 Review source artifact kind: ${input.artifactKind}
 
-Variant chunk to review:
+${continuityNote}
+
+Variant ${single ? "manuscript" : "chunk"} to review:
 ${JSON.stringify(
   {
     chunkIndex: input.chunkIndex + 1,
     chunkTotal: input.chunkTotal,
     id: input.variant.id,
-    manuscriptChunk: input.chunk,
+    manuscript: input.chunk,
     title: input.variant.title,
   },
   null,
@@ -1282,13 +1320,13 @@ ${JSON.stringify(
 Project memory excerpt:
 ${recallExcerpt(input.recall)}
 
-Critically review this chunk of a single variant for Gate 3 selection. Return only this variant chunk's review JSON.`;
+Critically review this ${single ? "chapter" : "chapter segment"} of a single variant for Gate 3 selection. Return only this variant's review JSON.`;
 
   return runAgent({
     agent: agents.criticVariant,
     prompt,
-    maxTokens: 1800,
-    label: `审稿 变体 ${input.variant.id} · 块 ${input.chunkIndex + 1} / 共 ${input.chunkTotal}`,
+    maxTokens: 2200,
+    label: single ? `审稿 变体 ${input.variant.id}` : `审稿 变体 ${input.variant.id} · 段 ${input.chunkIndex + 1} / 共 ${input.chunkTotal}`,
   });
 }
 
@@ -1300,7 +1338,11 @@ async function runCriticVariant(input: {
   sourceTitle: string;
   variant: ReturnType<typeof reviewCandidates>[number];
 }) {
-  const chunks = chunkText(input.variant.manuscript, 4500);
+  // 主路径：整章一次审完（避免按字数硬切造成的接缝误判）。仅超长章走段落边界兜底。
+  const chunks =
+    input.variant.manuscript.length <= CRITIC_SINGLE_PASS_LIMIT
+      ? [input.variant.manuscript]
+      : splitOnParagraphBoundary(input.variant.manuscript, CRITIC_SINGLE_PASS_LIMIT);
   const chunkReviews: VariantReview[] = [];
 
   for (const [chunkIndex, chunk] of chunks.entries()) {
@@ -1318,10 +1360,14 @@ async function runCriticVariant(input: {
     chunkReviews.push(chunkReview);
   }
 
+  if (chunkReviews.length === 1) {
+    return { ...chunkReviews[0], variantId: input.variant.id } satisfies VariantReview;
+  }
+
   return {
     variantId: input.variant.id,
     verdict: strongestVerdict(chunkReviews),
-    summary: chunkReviews.map((review, index) => `片段 ${index + 1}: ${review.summary}`).join("\n"),
+    summary: chunkReviews.map((review, index) => `段 ${index + 1}: ${review.summary}`).join("\n"),
     issues: chunkReviews.flatMap((review) => review.issues),
   } satisfies VariantReview;
 }

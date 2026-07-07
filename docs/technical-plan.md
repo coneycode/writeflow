@@ -250,7 +250,7 @@ Agent 定义位于 registry。每个 Agent 包含：
 - Muse 和 Architect 只接收续写上文末尾与项目记忆摘录。
 - Scribe 使用 `scribeSegmentAgent`，按 beat sheet 场景逐段生成正文。
 - Editor 使用 `editorSegmentAgent`，按场景逐段润色正文。
-- Critic 使用 `criticVariantAgent`，按变体与文本块审查，再聚合 verdict、summary 和 issues。
+- Critic 使用 `criticVariantAgent`，对【整章一次】审稿（`runCriticVariant`）。只有超长章（>`CRITIC_SINGLE_PASS_LIMIT`，28000 字）才按【段落/场景边界】（`splitOnParagraphBoundary`，绝不句中硬切）分段审、再合并。承接检查只针对章首对续写上文的衔接，章内场景推进不算缺陷——避免早期"按字数硬切每块单独审"造成的接缝假 blocker（开头残缺/未承接/截断）导致审稿永不 pass。
 - Archivist 先使用 `finalDigestAgent` 对（单章）终稿分块摘要，再用摘要生成记忆补丁。
 - `chapterSummaryAgent` 生成章节概要（供续写/拆章复用）；`spanRewriteAgent` 只重写圈选片段；`chapterPlannerAgent` 拆章。
 - `tailText`、`excerptText`、`chunkText`、`manuscriptContextExcerpt` 和 `recallExcerpt` 控制 prompt 尺寸。
