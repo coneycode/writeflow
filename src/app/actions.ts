@@ -16,6 +16,7 @@ import { buildNovelRecallContext } from "@/memory/recall";
 import { ATTRIBUTED_MEMORY_FILES, isAttributedTarget, reorderChapterBlocks, stripAllMachineBlocks, stripChapterBlocks, stripEmptyPatchMarkers, wrapChapterBlock } from "@/memory/chapter-blocks";
 import {
   AUTOPILOT_MAX_AUTO_RETRIES,
+  AUTOPILOT_GATE_INTERVAL,
   appendChapterSegment,
   clearChapterSegments,
   readBatch,
@@ -1318,6 +1319,8 @@ function reviewCandidates(source: DraftSet | EditSet) {
     id: variant.id,
     manuscript: variantManuscriptForReview(variant),
     title: variant.title,
+    changesMade: "changesMade" in variant ? variant.changesMade : [],
+    remainingConcerns: "remainingConcerns" in variant ? variant.remainingConcerns : [],
   }));
 }
 
@@ -1357,6 +1360,8 @@ async function runCriticVariantChunk(input: {
   recall: string;
   sourceTitle: string;
   variant: ReturnType<typeof reviewCandidates>[number];
+  /** 复审轮次的收敛锚：上一轮修订做了什么、哪些残余仍需核验。 */
+  revisionContext?: string;
 }) {
   const isFirst = input.chunkIndex === 0;
   const single = input.chunkTotal === 1;
@@ -1378,7 +1383,7 @@ Review source artifact kind: ${input.artifactKind}
 
 ${continuityNote}
 
-Variant ${single ? "manuscript" : "chunk"} to review:
+${input.revisionContext ? `复审收敛锚（上一轮已按审稿意见修订；请核验这些问题是否仍是实质缺陷，避免反复提出已被解决的同类主观意见）:\n${input.revisionContext}\n\n` : ""}Variant ${single ? "manuscript" : "chunk"} to review:
 ${JSON.stringify(
   {
     chunkIndex: input.chunkIndex + 1,
@@ -1411,6 +1416,7 @@ async function runCriticVariant(input: {
   recall: string;
   sourceTitle: string;
   variant: ReturnType<typeof reviewCandidates>[number];
+  revisionContext?: string;
 }) {
   // 主路径：整章一次审完（避免按字数硬切造成的接缝误判）。仅超长章走段落边界兜底。
   const chunks =
@@ -1430,6 +1436,7 @@ async function runCriticVariant(input: {
       recall: input.recall,
       sourceTitle: input.sourceTitle,
       variant: input.variant,
+      revisionContext: input.revisionContext,
     });
     chunkReviews.push(chunkReview);
   }
@@ -1532,6 +1539,18 @@ function formatIssuesForPrompt(issues: ReviewIssue[]) {
     .join("\n\n");
 }
 
+function revisionContextForCandidate(candidate: ReturnType<typeof reviewCandidates>[number], round: number) {
+  if (round === 0 || (candidate.changesMade.length === 0 && candidate.remainingConcerns.length === 0)) {
+    return undefined;
+  }
+  return `这是第 ${round + 1} 轮复审。上一轮修订已做的变更:\n${candidate.changesMade.map((item) => `- ${item}`).join("\n") || "- （未记录）"}\n\n上一轮修订仍认为可能残留的顾虑:\n${candidate.remainingConcerns.map((item) => `- ${item}`).join("\n") || "- （无）"}\n\n复审要求：优先核验这些已修问题是否仍是实质缺陷；不要因为同类风格还能继续优化就反复提出，除非它仍明显伤害节奏、人物或因果。`;
+}
+
+function revisionMaxTokens(manuscript: string) {
+  // 修订必须返回完整正文；长章若仍给 4200 token，会逼模型微调而非执行必要的删减/重构。
+  return Math.min(9000, Math.max(5000, Math.ceil(manuscript.length / 3)));
+}
+
 async function reviseVariantManuscript(input: {
   manuscriptContext: string;
   projectName: string;
@@ -1548,7 +1567,7 @@ ${tailText(input.manuscriptContext, 1800)}
 
 Variant: ${input.variantId} — ${input.variantTitle}
 
-需要修复的审稿问题（只修这些，其余内容尽量保持不变）:
+需要修复的审稿问题（每条的「建议」是主要修订指令；不同问题应采用不同动作：该删减就删减、该弱化就弱化、该替换就替换、该澄清设定就澄清）:
 ${formatIssuesForPrompt(input.issues)}
 
 待修订的完整正文:
@@ -1559,7 +1578,7 @@ ${recallExcerpt(input.recall)}
 
 Revise the manuscript to resolve the listed issues. Return the complete revised variant JSON.`;
 
-  return runAgent({ agent: agents.editorRevise, prompt, maxTokens: 4200, label: `修订 变体 ${input.variantId}` });
+  return runAgent({ agent: agents.editorRevise, prompt, maxTokens: revisionMaxTokens(input.manuscript), label: `修订 变体 ${input.variantId}` });
 }
 
 export async function reviseFromReviewForProject(formData: FormData) {
@@ -2533,7 +2552,8 @@ export async function applyMemoryPatchForProject(formData: FormData) {
 // ===== 自动续写（Autopilot）：一次输入需求，自动跑完多章 =====
 
 const AUTOPILOT_MAX_REVISIONS = 2;
-const AUTOPILOT_MAX_CHAPTERS = 10;
+/** 路线图章数由模型按纲领自算，此为防离谱的上限安全阀（截断到此）。 */
+const AUTOPILOT_ROADMAP_MAX = 60;
 
 type ChapterPipelineResult =
   | { status: "completed"; chapterTitle: string }
@@ -2773,6 +2793,7 @@ async function autopilotReviewLoop(input: {
         recall: input.recall,
         sourceTitle: editSet.sourceDraftTitle,
         variant: candidate,
+        revisionContext: revisionContextForCandidate(candidate, round),
       });
       reviews.push(review);
       if (!reused) {
@@ -2816,6 +2837,12 @@ async function autopilotReviewLoop(input: {
 
     if (round === AUTOPILOT_MAX_REVISIONS) {
       await saveProgress(undefined);
+      const hasBlockingIssue = allIssues.some((issue) => issue.severity === "blocker" || issue.severity === "major");
+      if (!hasBlockingIssue) {
+        // 轮次耗尽但只剩 minor：不因可选改进无限卡住自动续写，选择当前最佳变体继续。
+        const chosen = editSet.variants.find((variant) => variant.id === strongestVariantId) ?? editSet.variants[0];
+        return { ok: true as const, editSet, editArtifactId, chosenVariant: chosen };
+      }
       return { ok: false as const, verdict, issues: allIssues };
     }
 
@@ -3207,6 +3234,8 @@ async function runAutopilotBatch(
     const existingChapters = await ensureChapterSummaries(project, await latestFinalChapters(project));
     const finalizedCount = existingChapters.length;
     const planned = batch.plan;
+    // 本次 run 内真正写完的章数（跳过的已定稿章不计）。满一批（GATE_INTERVAL）则软停顿等审阅。
+    let writtenThisRun = 0;
 
     for (const [chapterIndex, chapter] of planned.entries()) {
       if (currentProgress()?.isCancelled) {
@@ -3242,29 +3271,47 @@ async function runAutopilotBatch(
       });
 
       if (result.status === "quality_failed") {
-        batch.status = "failed";
-        batch.failure = {
+        // 读回磁盘最新 batch 再改写：入口的 batch 是快照，其 checkpoints 从不在内存更新，
+        // 直接写回会抹掉 onStage 刚存好的各阶段 artifactId，导致续跑从构思方向重跑。
+        const fresh = (await readBatch(project.id)) ?? batch;
+        fresh.status = "failed";
+        fresh.failure = {
           globalIndex: chapter.index,
           kind: "quality",
           reason: `审稿 ${result.verdict}`,
         };
-        await writeBatch(project.id, batch);
+        await writeBatch(project.id, fresh);
         const blockers = result.issues.filter((issue) => issue.severity !== "minor").slice(0, 8).map((issue) => `- [${issue.severity}] ${issue.problem}`).join("\n");
         throw new Error(`在「${result.chapterTitle}」质量未达标（审稿 ${result.verdict}），已停止并保留此前已成章。未消解的主要问题：\n${blockers}`);
       }
       if (result.status === "duplicate") {
-        batch.status = "failed";
-        batch.failure = { globalIndex: chapter.index, kind: "duplicate", reason: `相似度 ${(result.similarity * 100).toFixed(0)}%` };
-        await writeBatch(project.id, batch);
+        const fresh = (await readBatch(project.id)) ?? batch;
+        fresh.status = "failed";
+        fresh.failure = { globalIndex: chapter.index, kind: "duplicate", reason: `相似度 ${(result.similarity * 100).toFixed(0)}%` };
+        await writeBatch(project.id, fresh);
         throw new Error(`在「${result.chapterTitle}」检测到与已成章高度重复（相似度 ${(result.similarity * 100).toFixed(0)}%），已停止并保留此前已成章。请调整该章要点或整体目标，让本章推进到新的情节，再重新自动续写。`);
       }
       // 本章完成：标记 checkpoint。
       await saveChapterCheckpointStage(project.id, chapter.index, { status: "completed" });
+      writtenThisRun += 1;
+
+      // 软闸门：本次已写满一批、且后面还有未定稿的计划章 → 停下等审阅（正常暂停，非失败）。
+      // 正常 return 使 run 标记 completed；batch=gated 由前端识别并提供「继续下一批」/超时自动续。
+      const hasMoreToWrite = planned.slice(chapterIndex + 1).some((c) => c.index > finalizedCount);
+      if (writtenThisRun >= AUTOPILOT_GATE_INTERVAL && hasMoreToWrite) {
+        const fresh = (await readBatch(project.id)) ?? batch;
+        fresh.status = "gated";
+        fresh.failure = undefined;
+        await writeBatch(project.id, fresh);
+        return;
+      }
     }
 
     // 全部完成。
-    batch.status = "completed";
-    await writeBatch(project.id, batch);
+    const done = (await readBatch(project.id)) ?? batch;
+    done.status = "completed";
+    done.failure = undefined;
+    await writeBatch(project.id, done);
   } catch (error) {
     // quality/duplicate 已在上面标记；其余归为"意外失败"，可自动续跑。
     const current = await readBatch(project.id);
@@ -3281,12 +3328,16 @@ async function runAutopilotBatch(
   }
 }
 
+/**
+ * 生成续写【路线图】：章数由模型按创作纲领（人物弧线/伏笔/结局基调）自行判断，
+ * 从当前进度规划到结局。只生成规划产物、不立即开写——用户审阅后再点「基于此规划开写」
+ * （runAutopilotFromPlanForProject）分批推进。取代了旧的"手填章数直接跑"。
+ */
 export async function runAutopilotForProject(formData: FormData) {
   "use server";
 
   const projectId = String(formData.get("projectId") ?? "");
   const overallGoal = String(formData.get("overallGoal") ?? "").trim();
-  const chapterCountRaw = Number(formData.get("chapterCount") ?? 0);
   const perChapterBriefs = String(formData.get("perChapterBriefs") ?? "")
     .split("\n")
     .map((line) => line.trim());
@@ -3295,21 +3346,28 @@ export async function runAutopilotForProject(formData: FormData) {
   if (!project) {
     throw new Error("Project not found.");
   }
-  if (!overallGoal) {
-    throw new Error("请填写整体目标。");
+
+  let hasBlueprint = false;
+  try {
+    const { resolved } = resolveMemoryTarget(project.rootPath, BLUEPRINT_PATH);
+    hasBlueprint = (await fs.readFile(resolved, "utf8")).trim().length > 0;
+  } catch {
+    hasBlueprint = false;
   }
-  const chapterCount = Math.min(Math.max(Math.floor(chapterCountRaw) || 1, 1), AUTOPILOT_MAX_CHAPTERS);
+  if (!overallGoal && !hasBlueprint) {
+    throw new Error("请填写本程聚焦目标，或先生成创作纲领。");
+  }
 
   await requireProjectManuscriptContext(project);
 
   await startJob({
     projectId: project.id,
     kind: "autopilot",
-    title: `自动续写 ${chapterCount} 章`,
+    title: "生成续写路线图",
     executor: async () => {
       const manuscriptContext = await requireProjectManuscriptContext(project);
 
-      // 首次归档时先把前情写进记忆（幂等，自动应用），使后续规划/写作从故事第一句起就有记忆。
+      // 首次归档时先把前情写进记忆（幂等，自动应用），使规划从故事第一句起就有记忆。
       await ensureContextArchived(project);
       const recall = await buildNovelRecallContext(project.rootPath);
 
@@ -3317,62 +3375,47 @@ export async function runAutopilotForProject(formData: FormData) {
       const existingChapters = await ensureChapterSummaries(project, await latestFinalChapters(project));
       const priorCount = existingChapters.length;
 
-      // 1. 拆章规划（显式产物）。规划器需要知道"前情之后已经写了哪些章"，
+      // 1. 路线图规划（显式产物，章数由模型自算）。规划器需要知道"前情之后已经写了哪些章"，
       //    以便从第 (priorCount + 1) 章接着往后规划、不与已成章重叠。
       const existingRecap = priorCount ? priorFinalChapterLines(existingChapters) : "（前情之后还没有已成章）";
-      const perChapterLines = perChapterBriefs
-        .map((brief, index) => (brief ? `第 ${index + 1} 章要点：${brief}` : `第 ${index + 1} 章：未指定（按整体目标自行编排）`))
-        .slice(0, chapterCount)
+      const briefLines = perChapterBriefs
+        .filter((brief) => brief.length > 0)
+        .map((brief, index) => `第 ${priorCount + index + 1} 章要点：${brief}`)
         .join("\n");
       const planPrompt = `Project: ${project.name}
 
 续写上文末尾:
 ${manuscriptContextExcerpt(manuscriptContext)}
 
-【前情之后已成章】（全书已写到第 ${priorCount} 章，以下是已发生内容，新规划必须从第 ${priorCount + 1} 章接着往后，绝不可与这些重叠或重演）:
+【前情之后已成章】（全书已写到第 ${priorCount} 章，以下是已发生内容，路线图必须从第 ${priorCount + 1} 章接着往后，绝不可与这些重叠或重演）:
 ${existingRecap}
 
-整体目标:
-${overallGoal}
+本程聚焦目标（可作为这段路线图的侧重，若为空则完全依据创作纲领）:
+${overallGoal || "（未额外指定，依据创作纲领规划到结局）"}
 
-需要新规划的章节数：${chapterCount}（这些是接在第 ${priorCount} 章之后的【新】章）
+逐章要点（若用户对开头几章给了要点，对应章必须遵循；其余由你规划到结局）:
+${briefLines || "（用户未指定逐章要点）"}
 
-逐章要点（对应本批新章，有则必须遵循，无则按整体目标自行编排）:
-${perChapterLines}
-
-Project memory:
+Project memory（其中「创作纲领」是写作前定的整体意图/人物弧线/伏笔/结局基调，据此决定这段故事到结局大约需要多少章）:
 ${recallExcerpt(recall)}
 
-Break this into exactly ${chapterCount} NEW chapter plans that continue AFTER chapter ${priorCount}.`;
-      const plan: ChapterPlan = await runAgent({ agent: agents.chapterPlanner, prompt: planPrompt, maxTokens: 2600, label: "拆解章节规划" });
-      // 把规划的 index 重映射为全局序号，展示与后续都用全局编号。
-      const planned = plan.chapters.slice(0, chapterCount).map((chapter, offset) => ({ ...chapter, index: priorCount + offset + 1 }));
+Plan the full roadmap from chapter ${priorCount + 1} to the ending. YOU decide how many chapters it takes — do not use a preset count.`;
+      const plan: ChapterPlan = await runAgent({ agent: agents.roadmapPlanner, prompt: planPrompt, maxTokens: 4000, label: "生成续写路线图" });
+      // 把规划的 index 重映射为全局序号，展示与后续都用全局编号；上限截断防离谱。
+      const planned = plan.chapters.slice(0, AUTOPILOT_ROADMAP_MAX).map((chapter, offset) => ({ ...chapter, index: priorCount + offset + 1 }));
       await persistJobArtifact({
         project,
         kind: "chapter_plan",
         relativeDir: "chapter-plans",
         fileName: "autopilot-chapter-plan",
-        title: `Autopilot chapter plan (chapters ${priorCount + 1}-${priorCount + planned.length})`,
+        title: `Autopilot roadmap (chapters ${priorCount + 1}-${priorCount + planned.length})`,
         content: JSON.stringify({ ...plan, chapters: planned, priorChapterCount: priorCount }, null, 2),
         stepType: "system",
-        stepTitle: "Chapter plan",
-        summary: `Autopilot planned chapters ${priorCount + 1}-${priorCount + planned.length}.`,
+        stepTitle: "Roadmap",
+        summary: `Autopilot roadmap: chapters ${priorCount + 1}-${priorCount + planned.length}（章数由纲领自算）。`,
       });
-
-      // 新建批次状态（覆盖旧批次），供失败续跑复用。
-      const batch: AutopilotBatch = {
-        batchId: randomUUID(),
-        overallGoal: plan.overallGoal || overallGoal,
-        plan: planned,
-        priorChapterCountAtStart: priorCount,
-        status: "running",
-        autoRetryCount: 0,
-        checkpoints: {},
-      };
-      await writeBatch(project.id, batch);
-
-      // 2. 逐章跑流水线（全局编号 = priorCount + 本批序号）。
-      await runAutopilotBatch(project, batch);
+      // 只生成路线图，不开写；用户审阅后点「基于此规划开写」分批推进。
+      revalidatePath(`/projects/${project.id}`);
     },
   });
 }
@@ -3438,18 +3481,25 @@ export async function resumeAutopilotJob(projectId: string, auto: boolean): Prom
     throw new Error("没有可继续的自动续写任务。");
   }
 
-  // quality/duplicate 是有意停下并报告：不自动续跑（自动模式直接返回不启动）。
-  if (auto && (batch.failure?.kind === "quality" || batch.failure?.kind === "duplicate")) {
-    return { started: false, reason: "quality/duplicate 不自动续跑" };
-  }
-  // 自动续跑受重试上限约束；手动续跑重置计数（人工介入）。
-  if (auto) {
-    if (batch.autoRetryCount >= AUTOPILOT_MAX_AUTO_RETRIES) {
-      return { started: false, reason: "已达自动重试上限" };
-    }
-    batch.autoRetryCount += 1;
-  } else {
+  const isGated = batch.status === "gated";
+  if (isGated) {
+    // 软闸门续跑是【正常推进】而非错误重试：不消耗 autoRetryCount、不受上限约束，
+    // 手动/超时自动都直接继续下一批。
     batch.autoRetryCount = 0;
+  } else {
+    // quality/duplicate 是有意停下并报告：不自动续跑（自动模式直接返回不启动）。
+    if (auto && (batch.failure?.kind === "quality" || batch.failure?.kind === "duplicate")) {
+      return { started: false, reason: "quality/duplicate 不自动续跑" };
+    }
+    // 自动续跑受重试上限约束；手动续跑重置计数（人工介入）。
+    if (auto) {
+      if (batch.autoRetryCount >= AUTOPILOT_MAX_AUTO_RETRIES) {
+        return { started: false, reason: "已达自动重试上限" };
+      }
+      batch.autoRetryCount += 1;
+    } else {
+      batch.autoRetryCount = 0;
+    }
   }
   batch.status = "running";
   batch.failure = undefined;

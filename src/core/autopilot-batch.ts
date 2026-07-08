@@ -21,6 +21,13 @@ export type ReviewProgress = {
 /** 自动续跑的自动重试上限（间隔 60s，仅意外失败）。 */
 export const AUTOPILOT_MAX_AUTO_RETRIES = 3;
 
+/** 分批软闸门：每写满这么多章就停下等审阅（不是失败，是正常推进的暂停点）。 */
+export const AUTOPILOT_GATE_INTERVAL = 5;
+/** 到达软闸门后，若用户在这段时间内未操作则自动继续下一批（20 分钟）。 */
+export const AUTOPILOT_GATE_AUTO_RESUME_MS = 20 * 60 * 1000;
+/** 失败自动重试的排程延迟（前端定时器用，1 分钟）。 */
+export const AUTOPILOT_FAILURE_AUTO_RESUME_MS = 60 * 1000;
+
 /** 单章各阶段的断点：记录已完成阶段的 artifactId，续跑时读回复用。 */
 export type ChapterCheckpoint = {
   globalIndex: number;
@@ -53,7 +60,8 @@ export type AutopilotBatch = {
   /** 全局编号的章节规划。 */
   plan: PlannedChapter[];
   priorChapterCountAtStart: number;
-  status: "running" | "failed" | "completed" | "cancelled";
+  /** gated = 已写满一批（GATE_INTERVAL 章）后的软停顿，等待审阅或超时自动续，非失败。 */
+  status: "running" | "gated" | "failed" | "completed" | "cancelled";
   /** 已自动续跑次数（跨刷新持久，上限 AUTOPILOT_MAX_AUTO_RETRIES）。 */
   autoRetryCount: number;
   failure?: { globalIndex: number; kind: AutopilotFailureKind; reason: string };

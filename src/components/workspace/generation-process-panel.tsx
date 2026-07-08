@@ -30,12 +30,21 @@ type RunState = {
 
 type ResumableInfo = {
   resumable: boolean;
+  /** true = 软闸门（每批停下等审阅），非失败。 */
+  gated?: boolean;
   autoEligible: boolean;
   autoRetriesLeft: number;
+  /** 自动续/重试的排程延迟（gated 为 20 分钟，failed 为 1 分钟）。 */
+  autoResumeDelayMs?: number;
+  /** 已定稿章数。 */
+  completedThrough?: number;
+  /** 路线图剩余未定稿章数。 */
+  remaining?: number;
   failure?: { globalIndex: number; kind: string; reason: string } | null;
 };
 
-const AUTO_RETRY_DELAY_MS = 60_000;
+/** 排程延迟兜底（接口未返回时）。 */
+const DEFAULT_AUTO_RESUME_DELAY_MS = 60_000;
 
 const statusLabels: Record<RunStatus, string> = {
   running: "运行中",
@@ -328,12 +337,13 @@ export function GenerationProcessPanel({ projectId }: { projectId: string }) {
     [projectId, findActive],
   );
 
-  // 当最近的 autopilot run 失败/中断时，查询是否可续跑，并按需排程 60s 自动重试。
+  // autopilot run 到达终态（完成/失败/中断）时查询 batch 是否可续跑，并按需排程自动续。
+  // 注意：软闸门（gated）时 run 是【正常 completed】，batch 才是 gated —— 因此 completed 也要查。
   useEffect(() => {
     if (!state || state.kind !== "autopilot") {
       return;
     }
-    if (state.status !== "failed" && state.status !== "interrupted") {
+    if (state.status !== "failed" && state.status !== "interrupted" && state.status !== "completed") {
       const reset = setTimeout(() => setResumable(null), 0);
       return () => clearTimeout(reset);
     }
@@ -346,15 +356,20 @@ export function GenerationProcessPanel({ projectId }: { projectId: string }) {
         if (cancelled) {
           return;
         }
+        // completed 且非 gated（真·全部写完）：无可续内容，清空。
+        if (state.status === "completed" && !info.gated) {
+          setResumable(null);
+          return;
+        }
         setResumable(info);
-        // 符合自动重试条件、且本 run 尚未排程过：60s 后自动续跑一次。
+        // 符合自动续条件、且本 run 尚未排程过：延迟后自动续一次（gated 20 分钟 / failed 1 分钟）。
         if (info.autoEligible && autoRetryScheduledRef.current !== state.runId) {
           autoRetryScheduledRef.current = state.runId;
           timer = setTimeout(() => {
             if (!cancelled) {
               void triggerResume(true);
             }
-          }, AUTO_RETRY_DELAY_MS);
+          }, info.autoResumeDelayMs ?? DEFAULT_AUTO_RESUME_DELAY_MS);
         }
       } catch {
         // 忽略
@@ -425,7 +440,27 @@ export function GenerationProcessPanel({ projectId }: { projectId: string }) {
         </p>
       ) : null}
 
-      {resumable?.resumable ? (
+      {resumable?.resumable && resumable.gated ? (
+        // 软闸门：正常推进的暂停点，用平和的绿色（区别于失败的红/琥珀）。
+        <div className="mt-2 rounded-lg border border-emerald-400/30 bg-emerald-950/20 p-2.5">
+          <p className="text-[11px] leading-5 text-emerald-100">
+            已按路线图写完一批{typeof resumable.completedThrough === "number" ? `（累计第 ${resumable.completedThrough} 章）` : ""}，
+            停下等你审阅{typeof resumable.remaining === "number" && resumable.remaining > 0 ? `，路线图还剩 ${resumable.remaining} 章` : ""}。
+            可现在继续下一批；约 20 分钟无操作将自动继续。
+          </p>
+          <div className="mt-2 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void triggerResume(false)}
+              disabled={resuming}
+              className="rounded-full border border-emerald-300/60 px-3 py-1 text-[11px] font-medium text-emerald-100 transition hover:bg-emerald-300 hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {resuming ? "继续中…" : "继续下一批"}
+            </button>
+            <span className="text-[11px] text-stone-400">约 20 分钟后自动继续</span>
+          </div>
+        </div>
+      ) : resumable?.resumable ? (
         <div className="mt-2 rounded-lg border border-amber-400/30 bg-amber-950/20 p-2.5">
           <p className="text-[11px] leading-5 text-amber-100">
             自动续写中断，已成章与已生成的阶段都已保留，可从断点继续（跳过已完成的章节与阶段）。

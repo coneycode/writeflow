@@ -75,6 +75,43 @@ JSON shape:
 }`,
 };
 
+export const roadmapPlannerAgent: AgentDefinition<typeof chapterPlanSchema> = {
+  id: "roadmap-planner",
+  name: "RoadmapPlanner",
+  role: "Plans a full continuation roadmap and decides how many chapters the story needs to reach its ending",
+  temperature: 0.6,
+  outputSchema: chapterPlanSchema,
+  systemPrompt: `You are RoadmapPlanner, the story-level planning agent in Writeflow.
+
+Plan a continuation ROADMAP: a chapter-by-chapter route from the current point to the story's ending. Crucially, YOU decide how many chapters the story needs — you are NOT given a fixed chapter count.
+
+How to decide the chapter count:
+- Read the 创作纲领 (blueprint): 整体目标, 人物弧线, 伏笔规划, 关键设定, 结局基调. The number of chapters is whatever it takes for the character arcs to complete, the planted foreshadowing to reasonably pay off, and the story to arrive at the 结局基调 — no more, no less.
+- Do not pad with filler chapters; do not rush multiple major turning points into one chapter. Let the material set the length. A tight arc may be a handful of chapters; a broad one may be many.
+- This is an ESTIMATE and an adjustable roadmap, NOT a fixed contract. Later chapters may be added, cut, or reshaped as the story develops. Plan the whole route as best you can now.
+
+Planning rules (same discipline as per-chapter planning):
+- Respect the supplied 续写上文, canon, timeline, current state, voice notes, and open threads. Continue AFTER the chapters already written; never restage or overlap with what already happened.
+- If the user supplied per-chapter briefs (for the first few chapters), those chapters' plans MUST honor them; plan the rest to reach the ending coherently.
+- Chapters form a continuous arc: each begins where the previous ended and pushes to a NEW situation. Every chapter covers distinct ground — no repeated setting-plus-beat, confrontation, or emotional turn.
+- Each chapter's brief states the NEW change of state, location, information, or relationship it delivers versus the chapter before it. Weave the blueprint's foreshadowing and arcs across the roadmap without pinning exact payoff chapters rigidly.
+- Do not write prose scenes; only plan.
+- Write in the story's language (Chinese if the material is Chinese). Return strict JSON only, with no markdown fences or commentary.
+
+JSON shape (chapters length = however many the story needs; index starts at 1 for the first NEW chapter):
+{
+  "overallGoal": "Restated overall goal / where this roadmap heads",
+  "chapters": [
+    {
+      "index": 1,
+      "title": "Chapter title",
+      "brief": "What this chapter delivers and how it continues the story toward the ending",
+      "focus": ["Key beat, arc step, or foreshadowing this chapter advances"]
+    }
+  ]
+}`,
+};
+
 export const museAgent: AgentDefinition<typeof directionSetSchema> = {
   id: "muse",
   name: "Muse",
@@ -406,6 +443,8 @@ Review exactly one draft variant (a whole chapter, or a labeled segment of one) 
 
 Rules:
 - Prioritize hard problems: canon contradictions, real timeline errors, character breaks, unsupported emotion, missing thread movement, weak causality, and prose that sounds generic.
+- Use verdicts with clear gates: reject only for unresolved blocker-level defects; revise for concrete major issues that materially harm story logic/character/pacing/style; pass when there are no blocker or major defects (minor suggestions may remain).
+- In a re-review after automatic revision, judge whether the prior issues still remain as material defects or whether the revision introduced new material defects. Do not keep raising the same subjective style concern merely because the prose could still be improved; only report it again if it is still clearly harmful, with fresh evidence.
 - Continuity is judged at the CHAPTER OPENING only: the chapter's first paragraph must follow on from the supplied 续写上文末尾. Scene changes, time passing, and location shifts WITHIN the chapter are normal storytelling — never flag them as "does not continue / missing transition / timeline error".
 - If the input is labeled as a non-first segment, it continues from the previous segment of the SAME chapter, not from 续写上文末尾. Do NOT report "truncated / incomplete opening / does not continue the context" for it — only judge its own canon/timeline/character/causality/prose issues.
 - Do not praise. Report findings only.
@@ -507,11 +546,12 @@ export const editorReviseAgent: AgentDefinition<typeof revisedVariantSchema> = {
 Revise one manuscript variant to resolve a specific list of review issues.
 
 Rules:
-- Fix ONLY the supplied review issues. Preserve everything else as-is.
-- Do not introduce new plot turns or new canon facts; keep the approved story logic.
+- Fix the supplied review issues by following each issue's suggestedFix as the primary instruction. Different issues require different revision actions: if an issue asks for compression/deletion, cut boldly; if it asks to weaken exposition, make it subtler; if it asks to replace a character beat, rewrite that beat; if it asks to clarify a setting/canon relation, adjust the necessary factual wording.
+- Preserve unrelated material only where it does not obstruct the requested fixes. Do NOT use "preserve the original" as an excuse to leave repeated exposition, over-explained themes, canon ambiguity, or misweighted character emotion in place.
+- Do not introduce new plot turns or new canon facts; keep the approved story logic. Clarifying existing canon or changing wording to remove a contradiction is allowed when an issue explicitly asks for it.
 - Keep continuity with the supplied manuscript context (do not restate it).
-- Address each issue using its suggestedFix where reasonable; if an issue cannot be fixed without breaking story logic, leave it and note it in remainingConcerns.
-- Remove generic AI phrasing and empty lyricism.
+- Address each issue using its suggestedFix; if an issue cannot be fixed without breaking story logic, leave it and note it in remainingConcerns.
+- Remove generic AI phrasing, repeated stock phrases, and empty lyricism. When the issue is about over-explanation or sluggish pacing, prefer concrete action and sensory detail over abstract thematic summary, and allow the revised manuscript to become significantly shorter.
 - Return the COMPLETE revised manuscript for this variant (not a diff), plus what you changed and what concerns remain.
 - Return strict JSON only, with no markdown fences or commentary.
 
@@ -573,6 +613,7 @@ JSON shape:
 
 export const agents = {
   chapterPlanner: chapterPlannerAgent,
+  roadmapPlanner: roadmapPlannerAgent,
   chapterSummary: chapterSummaryAgent,
   spanRewrite: spanRewriteAgent,
   blueprintPlanner: blueprintPlannerAgent,
