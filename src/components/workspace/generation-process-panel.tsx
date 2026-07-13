@@ -28,10 +28,51 @@ type RunState = {
   steps: RunStep[];
 };
 
+type RepairPlan = {
+  level: "route" | "outline" | "draft_scene" | "edit_scene" | "review_only" | "memory" | "unknown";
+  confidence: "high" | "medium" | "low";
+  summary: string;
+  recommendedAction: "rerun_review" | "revise_current_draft" | "regenerate_chapter" | "ask_author";
+  rationale: string;
+  affectedScenes?: string[];
+  affectedVariants?: string[];
+};
+
+type FailureDecision = {
+  title: string;
+  summary: string;
+  attempted: string[];
+  whyNeedsDecision: string;
+  issues: Array<{
+    severity: "blocker" | "major" | "minor";
+    problem: string;
+    evidence?: string;
+    suggestedFix?: string;
+  }>;
+  repairPlan?: RepairPlan;
+  options: Array<{
+    id: string;
+    label: string;
+    description: string;
+  }>;
+};
+
+type FailureDiagnosis = {
+  title: string;
+  summary: string;
+  cause: string;
+  impact: string;
+  canRetryAsIs: boolean;
+  recommendedAction: string;
+  rawError?: string;
+};
+
 type ResumableInfo = {
   resumable: boolean;
   /** true = 软闸门（每批停下等审阅），非失败。 */
   gated?: boolean;
+  /** true = 用户已暂停，保留诊断但不自动续跑。 */
+  paused?: boolean;
   autoEligible: boolean;
   autoRetriesLeft: number;
   /** 自动续/重试的排程延迟（gated 为 20 分钟，failed 为 1 分钟）。 */
@@ -40,7 +81,7 @@ type ResumableInfo = {
   completedThrough?: number;
   /** 路线图剩余未定稿章数。 */
   remaining?: number;
-  failure?: { globalIndex: number; kind: string; reason: string } | null;
+  failure?: { globalIndex: number; kind: string; category?: "recoverable" | "system_fix_required" | "author_decision_required" | "unknown"; reason: string; diagnosis?: FailureDiagnosis; repairPlan?: RepairPlan; decision?: FailureDecision } | null;
 };
 
 /** 排程延迟兜底（接口未返回时）。 */
@@ -321,10 +362,28 @@ export function GenerationProcessPanel({ projectId }: { projectId: string }) {
 
   // 触发续跑（手动或自动）。auto=true 为系统自动重试（受服务端上限约束）。
   const triggerResume = useCallback(
-    async (auto: boolean) => {
+    async (auto: boolean, decision?: string) => {
       setResuming(true);
       try {
-        await fetch(`/api/projects/${projectId}/resume-autopilot${auto ? "?auto=1" : ""}`, { method: "POST" });
+        const params = new URLSearchParams();
+        if (auto) {
+          params.set("auto", "1");
+        }
+        if (decision) {
+          params.set("decision", decision);
+        }
+        const query = params.toString();
+        const response = await fetch(`/api/projects/${projectId}/resume-autopilot${query ? `?${query}` : ""}`, { method: "POST" });
+        const result = (await response.json().catch(() => null)) as { started?: boolean } | null;
+        if (result?.started === false) {
+          const resumableResponse = await fetch(`/api/projects/${projectId}/resumable-autopilot`, { cache: "no-store" });
+          const info = (await resumableResponse.json().catch(() => null)) as ResumableInfo | null;
+          if (info) {
+            setResumable(info);
+          }
+          await findActive();
+          return;
+        }
         // 续跑会新建 run；触发查找并接管进度展示。
         window.dispatchEvent(new CustomEvent("writeflow:job-submitted"));
         setTimeout(() => void findActive(), 400);
@@ -462,26 +521,213 @@ export function GenerationProcessPanel({ projectId }: { projectId: string }) {
         </div>
       ) : resumable?.resumable ? (
         <div className="mt-2 rounded-lg border border-amber-400/30 bg-amber-950/20 p-2.5">
-          <p className="text-[11px] leading-5 text-amber-100">
-            自动续写中断，已成章与已生成的阶段都已保留，可从断点继续（跳过已完成的章节与阶段）。
-          </p>
-          <div className="mt-2 flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => void triggerResume(false)}
-              disabled={resuming}
-              className="rounded-full border border-amber-300/60 px-3 py-1 text-[11px] font-medium text-amber-100 transition hover:bg-amber-300 hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {resuming ? "继续中…" : "继续未完成的自动续写"}
-            </button>
-            {resumable.autoEligible ? (
-              <span className="text-[11px] text-stone-400">约 1 分钟后将自动重试（剩 {resumable.autoRetriesLeft} 次）</span>
-            ) : resumable.failure?.kind === "quality" || resumable.failure?.kind === "duplicate" ? (
-              <span className="text-[11px] text-stone-400">该章需人工调整，不自动重试</span>
-            ) : resumable.autoRetriesLeft === 0 ? (
-              <span className="text-[11px] text-stone-400">已自动重试 3 次仍失败，请手动继续</span>
-            ) : null}
-          </div>
+          {resumable.failure?.decision ? (
+            <div className="space-y-3">
+              <div>
+                <p className="text-[11px] font-semibold text-amber-100">{resumable.failure.decision.title}</p>
+                <p className="mt-1 text-[11px] leading-5 text-amber-100">{resumable.failure.decision.summary}</p>
+                <p className="mt-1 text-[11px] leading-5 text-stone-300">{resumable.failure.decision.whyNeedsDecision}</p>
+              </div>
+
+              {resumable.failure.decision.repairPlan ? (
+                <div className="rounded-lg border border-stone-700/70 bg-stone-950/40 p-2 text-[11px] leading-5 text-stone-300">
+                  <p className="font-medium text-stone-200">阶段定位：{resumable.failure.decision.repairPlan.level} · 置信度 {resumable.failure.decision.repairPlan.confidence}</p>
+                  <p className="mt-1 text-stone-400">{resumable.failure.decision.repairPlan.summary}</p>
+                  <p className="mt-1 text-stone-400">{resumable.failure.decision.repairPlan.rationale}</p>
+                </div>
+              ) : null}
+
+              {resumable.failure.decision.issues.length > 0 ? (
+                <div>
+                  <p className="text-[11px] font-medium text-stone-300">需要你决策的问题</p>
+                  <ul className="mt-1 space-y-1.5">
+                    {resumable.failure.decision.issues.map((issue, index) => (
+                      <li key={index} className="rounded-lg border border-stone-700/70 bg-stone-950/40 p-2 text-[11px] leading-5 text-stone-300">
+                        <span className="font-medium text-amber-100">[{issue.severity}] {issue.problem}</span>
+                        {issue.evidence ? <span className="mt-1 block text-stone-400">证据：{issue.evidence}</span> : null}
+                        {issue.suggestedFix ? <span className="mt-1 block text-stone-400">建议：{issue.suggestedFix}</span> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              {resumable.failure.decision.attempted.length > 0 ? (
+                <div>
+                  <p className="text-[11px] font-medium text-stone-300">系统已经尝试</p>
+                  <ul className="mt-1 list-disc space-y-1 pl-4 text-[11px] leading-5 text-stone-400">
+                    {resumable.failure.decision.attempted.map((item, index) => <li key={index}>{item}</li>)}
+                  </ul>
+                </div>
+              ) : null}
+
+              <div className="grid gap-2">
+                {resumable.failure.decision.options.map((option) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    onClick={() => void triggerResume(false, option.id)}
+                    disabled={resuming}
+                    className="rounded-lg border border-amber-300/50 p-2 text-left text-[11px] transition hover:bg-amber-300 hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <span className="block font-medium">{resuming ? "处理中…" : option.label}</span>
+                    <span className="mt-1 block leading-5 opacity-80">{option.description}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : resumable.failure?.diagnosis ? (
+            <div className="space-y-3">
+              <div>
+                <p className="text-[11px] font-semibold text-amber-100">{resumable.failure.diagnosis.title}</p>
+                <p className="mt-1 text-[11px] leading-5 text-amber-100">{resumable.failure.diagnosis.summary}</p>
+              </div>
+              <div className="grid gap-1.5 text-[11px] leading-5 text-stone-300">
+                {resumable.paused ? <p><span className="font-medium text-stone-200">当前状态：</span>已暂停自动续写，诊断信息已保留。</p> : null}
+                <p><span className="font-medium text-stone-200">系统判断：</span>{resumable.failure.category ?? "unknown"}</p>
+                <p><span className="font-medium text-stone-200">原因：</span>{resumable.failure.diagnosis.cause}</p>
+                <p><span className="font-medium text-stone-200">影响：</span>{resumable.failure.diagnosis.impact}</p>
+                <p><span className="font-medium text-stone-200">建议：</span>{resumable.failure.diagnosis.recommendedAction}</p>
+                {(resumable.failure.repairPlan ?? resumable.failure.decision?.repairPlan) ? (
+                  <div className="rounded-lg border border-stone-700/70 bg-stone-950/40 p-2">
+                    <p className="font-medium text-stone-200">阶段定位：{(resumable.failure.repairPlan ?? resumable.failure.decision?.repairPlan)?.level} · 置信度 {(resumable.failure.repairPlan ?? resumable.failure.decision?.repairPlan)?.confidence}</p>
+                    <p className="mt-1 text-stone-400">{(resumable.failure.repairPlan ?? resumable.failure.decision?.repairPlan)?.summary}</p>
+                    <p className="mt-1 text-stone-400">{(resumable.failure.repairPlan ?? resumable.failure.decision?.repairPlan)?.rationale}</p>
+                  </div>
+                ) : null}
+                {resumable.failure.diagnosis.rawError ? (
+                  <details className="mt-1 rounded-lg border border-stone-700/70 bg-stone-950/40 p-2">
+                    <summary className="cursor-pointer text-stone-400">原始错误</summary>
+                    <pre className="mt-2 whitespace-pre-wrap text-stone-500">{resumable.failure.diagnosis.rawError}</pre>
+                  </details>
+                ) : null}
+              </div>
+              <div className="mt-2 grid gap-2">
+                {resumable.paused ? (
+                  <>
+                    <p className="rounded-lg border border-stone-700/70 bg-stone-950/40 p-2 text-[11px] leading-5 text-stone-300">
+                      已暂停：现场已保留，系统不会继续往后写，也不会自动重试。
+                    </p>
+                    {resumable.failure.diagnosis.canRetryAsIs ? (
+                      <button
+                        type="button"
+                        onClick={() => void triggerResume(false)}
+                        disabled={resuming}
+                        className="rounded-lg border border-amber-300/60 p-2 text-left text-[11px] transition hover:bg-amber-300 hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <span className="block font-medium">{resuming ? "恢复中…" : resumable.failure.category === "system_fix_required" ? "应用修复并恢复" : "恢复自动续写"}</span>
+                        <span className="mt-1 block leading-5 opacity-80">你已暂停自动处理；点击后系统从断点继续，跳过已完成阶段。</span>
+                      </button>
+                    ) : null}
+                  </>
+                ) : null}
+                {!resumable.paused && resumable.failure.diagnosis.canRetryAsIs ? (
+                  <>
+                    <p className="rounded-lg border border-amber-300/40 bg-stone-950/40 p-2 text-[11px] leading-5 text-amber-100">
+                      系统会自动处理：{resumable.failure.category === "system_fix_required" ? "将应用已知系统修复后继续。" : "将从断点自动恢复。"}
+                    </p>
+                    <div className="grid gap-2 md:grid-cols-2">
+                      <button
+                        type="button"
+                        onClick={() => void triggerResume(false)}
+                        disabled={resuming}
+                        className="rounded-lg border border-amber-300/60 p-2 text-left text-[11px] transition hover:bg-amber-300 hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <span className="block font-medium">{resuming ? "继续中…" : resumable.failure.category === "system_fix_required" ? "立即应用修复并继续" : "立即从断点继续"}</span>
+                        <span className="mt-1 block leading-5 opacity-80">不需要作者决策；系统会跳过已完成阶段。</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void triggerResume(false, "cancel_batch")}
+                        disabled={resuming}
+                        className="rounded-lg border border-stone-600 p-2 text-left text-[11px] text-stone-200 transition hover:bg-stone-700 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <span className="block font-medium">暂停自动恢复</span>
+                        <span className="mt-1 block leading-5 opacity-80">停止自动重试，保留现场和诊断。</span>
+                      </button>
+                    </div>
+                  </>
+                ) : resumable.failure.category === "author_decision_required" ? (
+                  <>
+                    <p className="rounded-lg border border-stone-700/70 bg-stone-950/40 p-2 text-[11px] leading-5 text-stone-300">
+                      这里需要作者决策：系统不会自动往后写。请选择让系统如何处理当前失败章节。
+                    </p>
+                    <div className="grid gap-2 md:grid-cols-2">
+                      <button
+                        type="button"
+                        onClick={() => void triggerResume(false, "regenerate_chapter")}
+                        disabled={resuming}
+                        className="rounded-lg border border-amber-300/60 p-2 text-left text-[11px] text-amber-100 transition hover:bg-amber-300 hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <span className="block font-medium">重新生成本章</span>
+                        <span className="mt-1 block leading-5 opacity-80">放弃当前失败章节的中间产物，重新从本章开始生成。</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void triggerResume(false)}
+                        disabled={resuming}
+                        className="rounded-lg border border-red-300/50 p-2 text-left text-[11px] text-red-100 transition hover:bg-red-300 hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <span className="block font-medium">强制重试当前断点（不推荐）</span>
+                        <span className="mt-1 block leading-5 opacity-80">不改变路线图和输入，直接重跑失败 checkpoint，可能再次失败。</span>
+                      </button>
+                    </div>
+                  </>
+                ) : resumable.failure.category === "unknown" ? (
+                  <>
+                    <p className="rounded-lg border border-stone-700/70 bg-stone-950/40 p-2 text-[11px] leading-5 text-stone-300">
+                      系统无法可靠分类，默认保持暂停，不会自动重试。这里需要选择的是风险策略，而不是让你判断错误类型。
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => void triggerResume(false)}
+                      disabled={resuming}
+                      className="rounded-lg border border-red-300/50 p-2 text-left text-[11px] text-red-100 transition hover:bg-red-300 hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <span className="block font-medium">强制重试当前断点（不推荐）</span>
+                      <span className="mt-1 block leading-5 opacity-80">不修复原因，直接重跑失败 checkpoint，可能再次失败。</span>
+                    </button>
+                  </>
+                ) : (
+                  <p className="rounded-lg border border-stone-700/70 bg-stone-950/40 p-2 text-[11px] leading-5 text-stone-300">
+                    系统判断原样继续不可靠，已停止自动恢复；这类问题需要系统修复后再继续。
+                  </p>
+                )}
+                {resumable.autoEligible && !resumable.paused ? (
+                  <span className="text-[11px] text-stone-400">约 1 分钟后系统将自动处理（剩 {resumable.autoRetriesLeft} 次）</span>
+                ) : null}
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div>
+                <p className="text-[11px] font-semibold text-amber-100">需要选择下一步：系统暂无结构化诊断</p>
+                <p className="mt-1 text-[11px] leading-5 text-stone-300">
+                  已成章与已生成阶段都已保留。系统还不能可靠判断这次中断是否可原样恢复，因此默认建议先暂停，避免反复撞同一个错误。
+                </p>
+              </div>
+              <div className="grid gap-2">
+                <button
+                  type="button"
+                  onClick={() => void triggerResume(false, "cancel_batch")}
+                  disabled={resuming}
+                  className="rounded-lg border border-stone-600 p-2 text-left text-[11px] text-stone-200 transition hover:bg-stone-700 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <span className="block font-medium">{resuming ? "处理中…" : "暂停自动续写（推荐）"}</span>
+                  <span className="mt-1 block leading-5 opacity-80">保留现有结果，先让系统补充诊断或修复原因，再继续。</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void triggerResume(false)}
+                  disabled={resuming}
+                  className="rounded-lg border border-red-300/50 p-2 text-left text-[11px] text-red-100 transition hover:bg-red-300 hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <span className="block font-medium">仍尝试从断点继续</span>
+                  <span className="mt-1 block leading-5 opacity-80">系统无法分类时默认不建议原样继续；该选项只作为强制重试兜底，可能再次失败。</span>
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       ) : null}
 

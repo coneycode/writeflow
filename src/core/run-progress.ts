@@ -6,6 +6,7 @@ import path from "node:path";
 import { desc, eq } from "drizzle-orm";
 
 import { db, schema } from "@/db/client";
+import { readBatch } from "@/core/autopilot-batch";
 import { projectRoot } from "@/lib/paths";
 
 export type RunKind = "muse" | "architect" | "scribe" | "editor" | "critic" | "final" | "archivist" | "autopilot";
@@ -386,6 +387,42 @@ export async function findActiveRun(projectId: string): Promise<RunState | null>
     }
     const state = await readRunState(projectId, row.id);
     if (state && state.status === "running") {
+      return state;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * 查询工作台应展示的 run：优先返回正在运行的 run；若没有运行中任务，
+ * 返回最近一个可续跑/需审阅的 autopilot 终态 run，避免刷新后“生成过程”消失。
+ */
+export async function findVisibleRun(projectId: string): Promise<RunState | null> {
+  const active = await findActiveRun(projectId);
+  if (active) {
+    return active;
+  }
+
+  const batch = await readBatch(projectId);
+  const isPausedWithFailure = batch?.status === "cancelled" && Boolean(batch.failure);
+  if (!batch || (batch.status !== "failed" && batch.status !== "gated" && !isPausedWithFailure)) {
+    return null;
+  }
+
+  const rows = await db
+    .select()
+    .from(schema.runs)
+    .where(eq(schema.runs.projectId, projectId))
+    .orderBy(desc(schema.runs.createdAt))
+    .limit(10);
+
+  for (const row of rows) {
+    if (row.currentStep !== "autopilot" || row.status === "running") {
+      continue;
+    }
+    const state = await readRunState(projectId, row.id);
+    if (state?.kind === "autopilot") {
       return state;
     }
   }

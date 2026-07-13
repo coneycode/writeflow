@@ -12,8 +12,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
   const { projectId } = await params;
   const url = new URL(request.url);
   const auto = url.searchParams.get("auto") === "1";
+  const decision = url.searchParams.get("decision") ?? undefined;
   try {
-    const result = await resumeAutopilotJob(projectId, auto);
+    const result = await resumeAutopilotJob(projectId, auto, decision);
     return NextResponse.json(result);
   } catch (error) {
     return NextResponse.json({ started: false, error: error instanceof Error ? error.message : String(error) }, { status: 400 });

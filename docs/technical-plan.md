@@ -4,6 +4,16 @@
 
 Writeflow 是一个独立的本地优先 Next.js 应用。它使用 SQLite 存储元数据，并把长文项目内容保存为本地项目目录下的文件。Agent 在服务端执行，通过 OpenAI-compatible chat completion provider 调用模型。Agent 输出使用 Zod 校验，并持久化为 JSON artifact。
 
+当前系统能力由五层协作组成：
+
+1. **项目层**：`projects` 表 + `data/projects/{projectId}` 目录保存项目元数据、上文、记忆、artifact、run state 和 autopilot batch；首页负责创建、进入和删除项目。
+2. **记忆层**：Markdown 记忆文件作为所有写作 Agent 的可编辑约束源；章节归档用 `wf:chapter` 标记块实现按章替换和重建。
+3. **产物层**：方向、大纲、草稿、润色、审稿、终稿、记忆补丁和路线图都作为 artifact 落盘，并用 `parentArtifactId` 串起章节谱系。
+4. **执行层**：Server Actions 启动后台任务，`RunProgress` 把每次模型调用的步骤、输出、状态和错误写入 `runs/{runId}/state.json`，SSE + 轮询驱动前端实时展示和刷新恢复。
+5. **编排层**：手动流程由 UI 闸门逐步推进；Autopilot 复用同一批 Agent 与 artifact，以 `autopilot/current.json` 保存路线图、checkpoint、段级进度、审稿修订进度和重试计数。
+
+数据流是：用户维护上文/记忆 → Agent 读取 recall 并产出 artifact → 人工闸门或 Autopilot 选择下一步 → 终稿累计为章节 → Archivist 把新事实写回记忆 → 下一章生成再次读取更新后的记忆。
+
 ## 技术栈
 
 - 框架：Next.js 16.2.9。
@@ -162,6 +172,7 @@ Artifact 类型：
 当前 server actions 提供主要应用行为：
 
 - `createProject`：创建项目、本地目录和小说记忆模板。
+- `deleteProject`：从项目列表删除项目，清理关联 run / step / gate / artifact 元数据，并删除 `data/projects/{projectId}` 本地目录（带路径边界校验）。
 - `updateProjectManuscriptContext`：保存上文上下文。
 - `updateProjectMemoryFile`：更新允许范围内的记忆文件。
 - `runMuseForProject`：基于上文和记忆生成续写方向。
@@ -190,7 +201,7 @@ Artifact 类型：
 
 - 进度落盘：`src/core/run-progress.ts` 把每步的智能体、子步骤标签、模型逐字输出、起止时间写入 `data/projects/{id}/runs/{runId}/state.json`（防抖落盘 + 运行中心跳）。
 - 流式：`OpenAICompatibleProvider` 在有进度上下文时使用 `stream: true`，逐 token 上报。
-- 前端：`GET /api/projects/{id}/active-run` 用于刷新后重连；`GET /api/projects/{id}/runs/{runId}/stream`（SSE）实时推送进度，断连自动重连。
+- 前端：`GET /api/projects/{id}/active-run` 用于刷新后恢复“当前应展示的 run”：优先恢复 running run；若没有运行中任务但 Autopilot batch 处于 failed/gated，则恢复最近的 autopilot 终态 run，保证错误报告、步骤记录和继续按钮不会因刷新消失。`GET /api/projects/{id}/runs/{runId}/stream`（SSE）实时推送进度，断连自动重连。
 - 由于后台任务不能调用 `revalidatePath`，完成后由前端 `router.refresh()` 拉取新产物。
 - stale 判定：running 超过阈值（5 分钟）且无心跳则视为中断。
 - 中止：`RunProgress` 持有 `AbortController`，`/api/projects/{id}/runs/{runId}/cancel`（POST）触发 `requestCancel`，executor 在阶段边界检查 `isCancelled` 后优雅停下。
@@ -202,8 +213,9 @@ Artifact 类型：
 - `runAutopilotForProject` 入参：`projectId`、可选 `overallGoal`（本程聚焦目标）、`perChapterBriefs`（可选的开头几章要点）。它不再接收固定 `chapterCount`，而是调用 `roadmapPlannerAgent` 根据创作纲领、续写上文、已有记忆和用户要点自行判断从当前进度到结局需要多少章，落 `chapter_plan` 路线图产物后结束，不立即开写。`AUTOPILOT_ROADMAP_MAX` 只作为离谱章数的安全截断。
 - `runAutopilotFromPlanForProject` 读取最新 `chapter_plan`，组装 `AutopilotBatch` 后进入 `runAutopilotBatch`。
 - `runChapterPipeline` 收拢单章流程：Muse 方向（自动采纳推荐）→ Architect 大纲 → Scribe A/B 变体（`runScribeVariant`）→ Editor 逐场润色（`runEditorSegment`）→ `autopilotReviewLoop` → `appendSelectedFinalChapter` 累计进全文 → `archiveChapterMemory`（只摘要本章、按章标记写入记忆并自动应用）。
-- `autopilotReviewLoop`：逐候选 `runCriticVariant` 聚合 verdict；pass 即返回选中变体，否则 `reviseVariantManuscript` 按 issues 修订重审，最多 `AUTOPILOT_MAX_REVISIONS`（默认 2）轮。修订 prompt 以每条 issue 的 `suggestedFix` 为主指令，允许按问题类型执行删减、弱化、替换或澄清设定；修订 maxTokens 按正文长度动态提高，避免长章只能微调。复审会收到上一轮 `changesMade/remainingConcerns` 作为收敛锚，避免同类主观风格意见反复漂移。轮次耗尽时仅在无 blocker/major、只剩 minor 时放行；残留 blocker/major 返回 `{ ok: false, verdict, issues }`。
-- 单章返回 `quality_failed`/`duplicate` 时编排器停止并抛出带报告的错误，run 标记失败、batch 记 `failure.kind`，**前面已成章已落盘保留**。写入 failure 前会读回磁盘最新 batch，避免用入口快照覆盖已落盘 checkpoint。
+- `autopilotReviewLoop`：逐候选 `runCriticVariant` 聚合 verdict；pass 即返回选中变体，否则 `reviseVariantManuscript` 按 issues 修订重审，最多 `AUTOPILOT_MAX_REVISIONS`（默认 2）轮。修订 prompt 以每条 issue 的 `suggestedFix` 为主指令，允许按问题类型执行删减、弱化、替换或澄清设定；修订 maxTokens 按正文长度动态提高，避免长章只能微调。复审会收到上一轮 `changesMade/remainingConcerns` 作为收敛锚，避免同类主观风格意见反复漂移。轮次耗尽时仅在无 blocker/major、只剩 minor 时放行；残留 blocker/major 返回 `{ ok: false, verdict, issues, repairPlan }`。
+- `diagnoseReviewRepairPlan` 会把残留审稿问题归因到 `route`、`outline`、`draft_scene`、`edit_scene`、`review_only`、`memory` 或 `unknown`，并给出 `rerun_review`、`revise_current_draft`、`regenerate_chapter` 或 `ask_author` 的建议动作。该 repair plan 会写入 `failure.repairPlan` 与 `failure.decision.repairPlan`，供前端展示“阶段定位”和推荐修复路径；当前它先用于诊断和决策文案，真正的局部场景回滚/重修仍是后续增强点。
+- 单章返回 `quality_failed`/`duplicate` 时编排器停止并抛出带报告的错误，run 标记失败、batch 记 `failure.kind`、`failure.category`、结构化诊断和可选决策信息，**前面已成章已落盘保留**。写入 failure 前会读回磁盘最新 batch，避免用入口快照覆盖已落盘 checkpoint。
 - 每章前检查 `currentProgress()?.isCancelled` 支持中止；artifact 通过 `parentArtifactId` 维持谱系，产出自然流入章节档案与全文展示。
 - 产物谱系与终稿累计逻辑与手动流程一致（`finalChapters`、`combineManuscriptContextTail`、`latestFinalChapters`）。跨章路线图已带全局编号；防重复以 `manuscriptSimilarity` 与最近若干已成章比对。
 
@@ -215,9 +227,9 @@ Artifact 类型：
 - 跳过已定稿章：`chapter.index <= latestFinalChapters().length` 则略过。
 - 分批软闸门：本次 run 内真正写完 `AUTOPILOT_GATE_INTERVAL`（5）章且路线图仍有剩余时，batch 置 `gated` 并正常 return，run 显示 completed 而非 failed。前端在 completed 后查询 `resumable-autopilot`，展示绿色「继续下一批」提示；20 分钟无操作自动续（依赖页面保持打开）。
 - 阶段复用：`runChapterPipeline` 接收 `checkpoint` 与 `onStage`，每阶段（方向/大纲/草稿/润色）前若已有产物 ID 则 `reloadArtifact` 读回复用，否则跑并回调 `saveChapterCheckpointStage` 记录；读回失败降级重跑该阶段（幂等，`archiveChapterMemory` 按 chapterId strip+rewrite 亦幂等）。
-- 段级复用（更细粒度）：草稿/润色是"变体 × 多场景"的循环，每完成一场即经 `appendChapterSegment` 逐场落盘到 `checkpoint.draftSegments/editSegments`（按变体 id 分组）。续跑时 `runScribeVariant`/润色循环按 `sceneId` 跳过已完成的场，只补未完成的场——失败在变体 B 第 3 场时，变体 A 全部与 B 前 2 场都不重跑。整阶段落盘后 `clearChapterSegments` 清掉段级中间态（artifactId 已足够整段复用）。
+- 段级复用（更细粒度）：草稿/润色是"变体 × 多场景"的循环，每完成一场即经 `appendChapterSegment` 逐场落盘到 `checkpoint.draftSegments/editSegments`（按变体 id 分组）。续跑时 `runScribeVariant`/润色循环按 `sceneId` 跳过已完成的场，只补未完成的场——失败在变体 B 第 3 场时，变体 A 全部与 B 前 2 场都不重跑。整阶段落盘后 `clearChapterSegments` 清掉段级中间态（artifactId 已足够整段复用）。草稿 segment 的 `notes` 是辅助字段，schema 默认空数组，避免模型漏掉非正文关键字段时中断整批。
 - 审稿修订循环复用：`autopilotReviewLoop` 接收 `reviewCheckpoint`/`onReviewProgress`，把 `checkpoint.reviewProgress{round, editArtifactId, variantReviews, revisedVariants}` 逐变体落盘。续跑时从记录的轮次接着走、读回当轮 EditSet，已审/已修订的变体直接复用，不重审重修；pass 或达轮上限时清除 `reviewProgress`。
-- 定稿→归档缺口修复：定稿 `appendSelectedFinalChapter` 后立即记 `finalizedChapterId` + `archivedMemory:false`，`archiveChapterMemory` 完成后置 `archivedMemory:true`。续跑遇到"已定稿但 `archivedMemory!==true"`的章会**补跑归档**（幂等），杜绝进程死在定稿与归档之间导致该章记忆永久缺失。
+- 定稿→归档缺口修复：定稿 `appendSelectedFinalChapter` 后立即记 `finalizedChapterId` + `archivedMemory:false`，`archiveChapterMemory` 完成后置 `archivedMemory:true`。续跑遇到“已定稿但 `archivedMemory!==true`”的章会**补跑归档**（幂等），杜绝进程死在定稿与归档之间导致该章记忆永久缺失；遇到已定稿章也会归一化 checkpoint 为 `status: completed`，避免“实际完成但状态 pending”误导 UI 与排查。
 - `runAutopilotForProject`：生成续写路线图并落 `chapter_plan`，不立即开写。
 - `runAutopilotFromPlanForProject`：读最新 `chapter_plan` 产物直接组装 batch 开跑，不重新规划。
 - `resumeAutopilotJob(projectId, auto)`：从 batch 续跑；`gated` 是正常推进，不消耗自动重试次数、不受上限约束；意外失败的 `auto` 受 `AUTOPILOT_MAX_AUTO_RETRIES`（3）约束并自增计数，手动则重置计数；`quality`/`duplicate` 不允许自动续跑。经 `POST /api/projects/{id}/resume-autopilot?auto=1` 与 server action 两条入口调用。
@@ -353,7 +365,7 @@ UI 采用三栏写作 IDE 布局，由 Client 外壳 `WorkspaceLayout` 管理当
 - `WorkspaceLayout` / `StageRail` / `ContextRail`：三栏布局、左栏阶段管线、右栏上下文。
 - `workspace-stage.ts`：`deriveStages` 按产物存在性派生阶段状态。
 - 阶段面板：`ManuscriptContextPanel`、`MusePanel`、`ArchitectPanel` + `OutlineWorkspace`、`ScribePanel` + `DraftWorkspace`、`EditorPanel`、`CriticPanel`、`FinalSelectionPanel`、`MemoryPatchPanel`。
-- `GenerationProcessPanel`：右栏常驻，SSE 实时进度；autopilot 失败/中断时显示「继续」按钮并按 `resumable-autopilot` 排程自动重试（计数由服务端 batch 持久，刷新不清零）。
+- `GenerationProcessPanel`：右栏常驻，SSE 实时进度；恢复 running run，也会在 Autopilot failed/gated 时恢复最近可见终态 run；失败/中断时显示「继续」按钮并按 `resumable-autopilot` 排程自动重试（计数由服务端 batch 持久，刷新不清零）。
 - `CollapsibleProse`：长正文折叠/展开，展开也有最大高度、内部滚动。
 - `FinalChapterReader`：终稿阅读区（client），章节列表点选后只显示该章正文；编辑态支持改标题/正文、圈选重写、删除（server action 经 prop 传入）。
 - `MemoryFileCard` + `MarkdownView`：记忆页按 Markdown 渲染阅读、点「编辑」进文本框。

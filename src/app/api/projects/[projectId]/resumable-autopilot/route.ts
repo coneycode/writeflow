@@ -6,6 +6,7 @@ import {
   AUTOPILOT_MAX_AUTO_RETRIES,
   AUTOPILOT_GATE_AUTO_RESUME_MS,
   AUTOPILOT_FAILURE_AUTO_RESUME_MS,
+  classifyAutopilotFailureMessage,
   readBatch,
 } from "@/core/autopilot-batch";
 import { projectRoot } from "@/lib/paths";
@@ -41,7 +42,8 @@ export async function GET(_request: Request, { params }: { params: Promise<{ pro
   const { projectId } = await params;
   const batch = await readBatch(projectId);
 
-  if (!batch || (batch.status !== "failed" && batch.status !== "gated")) {
+  const isPausedWithFailure = batch?.status === "cancelled" && Boolean(batch.failure);
+  if (!batch || (batch.status !== "failed" && batch.status !== "gated" && !isPausedWithFailure)) {
     return NextResponse.json({ resumable: false, gated: false, autoEligible: false, autoRetriesLeft: 0, failure: null });
   }
 
@@ -64,15 +66,47 @@ export async function GET(_request: Request, { params }: { params: Promise<{ pro
 
   const retriesLeft = Math.max(0, AUTOPILOT_MAX_AUTO_RETRIES - batch.autoRetryCount);
   const unexpected = batch.failure?.kind === "error" || batch.failure?.kind === "interrupted";
+  const paused = batch.status === "cancelled";
+  const fallbackDiagnosis = batch.failure && !batch.failure.diagnosis
+    ? classifyAutopilotFailureMessage(batch.failure.reason)
+    : null;
+  const failure = batch.failure
+    ? {
+        ...batch.failure,
+        category: batch.failure.category ?? (batch.failure.kind === "quality" || batch.failure.kind === "duplicate" ? "author_decision_required" : fallbackDiagnosis?.category),
+        repairPlan: batch.failure.repairPlan ?? (batch.failure.kind === "quality" ? {
+          level: "unknown" as const,
+          confidence: "low" as const,
+          summary: "旧版 batch 未保存阶段归因，无法可靠判断应回退到哪一层。",
+          recommendedAction: "ask_author" as const,
+          rationale: "建议先查看审稿问题；如无法定位，再选择重新生成本章或暂停。",
+        } : undefined),
+        diagnosis: batch.failure.diagnosis ?? fallbackDiagnosis?.diagnosis ?? {
+          title: batch.failure.kind === "quality" ? "审稿未通过，需要选择下一步" : batch.failure.kind === "duplicate" ? "章节重复度过高，需要选择下一步" : "自动续写中断，系统无法可靠分类",
+          summary: batch.failure.reason,
+          cause: batch.failure.kind === "quality" ? "当前章节没有通过审稿；旧版 batch 未保存完整阶段归因。" : batch.failure.kind === "duplicate" ? "当前章节与已成章重复度过高，旧版 batch 未保存完整重复诊断。" : "未知错误。",
+          impact: "已成章与已生成阶段都已保留。",
+          canRetryAsIs: false,
+          recommendedAction: batch.failure.kind === "quality" ? "建议先查看审稿问题并选择最小回退策略，不要默认整章重写。" : batch.failure.kind === "duplicate" ? "建议重新生成本章，或暂停后明确本章必须产生的新事件。" : "建议暂停自动续写，先补充诊断或修复原因。",
+          rawError: batch.failure.reason,
+        },
+      }
+    : null;
+  const autoRecoverable = Boolean(failure?.diagnosis?.canRetryAsIs);
+  const autoEligible = !paused && hasRemaining && retriesLeft > 0 && (unexpected || autoRecoverable);
+  const autoResumeDelayMs = failure?.category === "system_fix_required" && autoRecoverable
+    ? 0
+    : AUTOPILOT_FAILURE_AUTO_RESUME_MS;
 
   return NextResponse.json({
     resumable: hasRemaining,
     gated: false,
-    autoEligible: hasRemaining && unexpected && retriesLeft > 0,
+    paused,
+    autoEligible,
     autoRetriesLeft: retriesLeft,
-    autoResumeDelayMs: AUTOPILOT_FAILURE_AUTO_RESUME_MS,
+    autoResumeDelayMs,
     completedThrough: finalized,
     remaining,
-    failure: batch.failure ?? null,
+    failure,
   });
 }

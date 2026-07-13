@@ -4,7 +4,7 @@ export const draftSegmentSchema = z.object({
   sceneId: z.string(),
   sceneTitle: z.string(),
   manuscript: z.string(),
-  notes: z.array(z.string()),
+  notes: z.array(z.string()).default([]),
 });
 
 export const draftVariantSchema = z.object({

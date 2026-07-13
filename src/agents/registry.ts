@@ -515,6 +515,7 @@ Rules:
 - The supplied 前情 (prior manuscript context) is already-established background. Do NOT propose memory changes that merely restate facts already present in the 前情 or current memory; only capture what is genuinely new or changed in the selected final manuscript.
 - Update progress state and open threads when appropriate.
 - Mark every change as requiring approval.
+- Use ONLY these memory targets unless creating/updating an existing character card: memory/plan/blueprint.md, memory/canon/world.md, memory/canon/timeline.md, memory/progress/state.md, memory/progress/open_threads.md, memory/style/voice.md, memory/style/taboo.md, memory/canon/characters/*.md. Do NOT invent nested world files such as memory/canon/world/military.md; put military/location/world facts into memory/canon/world.md.
 - "operation" MUST be exactly one of: "append", "update", "open_thread", "close_thread". Use "update" to replace a file's content; never invent other values such as "replace".
 - Return strict JSON only, with no markdown fences or commentary.
 

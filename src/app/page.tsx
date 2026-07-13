@@ -1,6 +1,8 @@
 import Link from "next/link";
 
-import { createProject, listProjects } from "./actions";
+import { DeleteProjectButton } from "@/components/delete-project-button";
+
+import { createProject, deleteProject, listProjects } from "./actions";
 
 const projectTypeLabels = {
   novel: "小说续写",
@@ -96,20 +98,29 @@ export default async function Home() {
                 </div>
               ) : (
                 projects.map((project) => (
-                  <Link
-                    href={`/projects/${project.id}`}
+                  <div
                     key={project.id}
                     className="group rounded-2xl border border-stone-800 bg-stone-950/70 p-5 transition hover:border-amber-300/70"
                   >
                     <div className="flex items-start justify-between gap-4">
-                      <div>
+                      <Link href={`/projects/${project.id}`} className="min-w-0 flex-1">
                         <h3 className="text-lg font-medium group-hover:text-amber-200">{project.name}</h3>
                         <p className="mt-1 text-sm text-stone-500">{projectTypeLabels[project.type]}</p>
+                      </Link>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <span className="rounded-full bg-stone-800 px-3 py-1 text-xs text-stone-400">{projectStatusLabels[project.status]}</span>
+                        <form action={deleteProject}>
+                          <input type="hidden" name="projectId" value={project.id} />
+                          <DeleteProjectButton projectName={project.name} />
+                        </form>
                       </div>
-                      <span className="rounded-full bg-stone-800 px-3 py-1 text-xs text-stone-400">{projectStatusLabels[project.status]}</span>
                     </div>
-                    {project.description ? <p className="mt-4 text-sm text-stone-400">{project.description}</p> : null}
-                  </Link>
+                    {project.description ? (
+                      <Link href={`/projects/${project.id}`} className="mt-4 block text-sm text-stone-400">
+                        {project.description}
+                      </Link>
+                    ) : null}
+                  </div>
                 ))
               )}
             </div>

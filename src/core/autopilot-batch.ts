@@ -53,6 +53,115 @@ export type ChapterCheckpoint = {
 
 export type AutopilotFailureKind = "error" | "interrupted" | "quality" | "duplicate";
 
+export type AutopilotDecisionOption = {
+  id: "retry_from_checkpoint" | "regenerate_chapter" | "cancel_batch";
+  label: string;
+  description: string;
+};
+
+export type AutopilotRepairPlan = {
+  level: "route" | "outline" | "draft_scene" | "edit_scene" | "review_only" | "memory" | "unknown";
+  confidence: "high" | "medium" | "low";
+  summary: string;
+  recommendedAction: "rerun_review" | "revise_current_draft" | "regenerate_chapter" | "ask_author";
+  rationale: string;
+  affectedScenes?: string[];
+  affectedVariants?: string[];
+};
+
+export type AutopilotFailureCategory = "recoverable" | "system_fix_required" | "author_decision_required" | "unknown";
+
+export type AutopilotFailureDiagnosis = {
+  title: string;
+  summary: string;
+  cause: string;
+  impact: string;
+  canRetryAsIs: boolean;
+  recommendedAction: string;
+  rawError?: string;
+};
+
+export type AutopilotFailureDecision = {
+  title: string;
+  summary: string;
+  attempted: string[];
+  whyNeedsDecision: string;
+  issues: Array<{
+    severity: "blocker" | "major" | "minor";
+    problem: string;
+    evidence?: string;
+    suggestedFix?: string;
+  }>;
+  repairPlan?: AutopilotRepairPlan;
+  options: AutopilotDecisionOption[];
+};
+
+export function classifyAutopilotFailureMessage(message: string): { category: AutopilotFailureCategory; diagnosis: AutopilotFailureDiagnosis } {
+  const lower = message.toLowerCase();
+
+  if (message.includes("Memory patch target is not allowed")) {
+    const target = message.match(/Memory patch target is not allowed: ([^\n]+)/)?.[1]?.trim();
+    const canNormalizeWorld = Boolean(target?.startsWith("memory/canon/world/") && target.endsWith(".md"));
+    return {
+      category: "system_fix_required",
+      diagnosis: {
+        title: "记忆归档目标未注册",
+        summary: target ? `Archivist 试图写入未注册的记忆文件：${target}。` : "Archivist 试图写入未注册的记忆文件。",
+        cause: "模型生成了当前记忆系统没有注册的目标路径。",
+        impact: "正文与中间产物已保留，但记忆归档没有完成；如果没有目标映射修复，原样继续会再次失败。",
+        canRetryAsIs: canNormalizeWorld,
+        recommendedAction: canNormalizeWorld
+          ? "当前版本会把 memory/canon/world/*.md 归并到 memory/canon/world.md，可应用映射后从断点继续。"
+          : "需要先注册或映射该记忆目标，再继续自动续写。",
+        rawError: message,
+      },
+    };
+  }
+
+  if (message.includes("Invalid input") || lower.includes("expected") || lower.includes("zod")) {
+    return {
+      category: "system_fix_required",
+      diagnosis: {
+        title: "模型输出格式与系统 schema 不匹配",
+        summary: "某个智能体返回的数据没有通过结构校验。",
+        cause: "模型输出缺字段或字段类型不符合当前 schema。",
+        impact: "已完成阶段会保留；如果 schema/prompt 没有兼容修复，原样继续可能再次失败。",
+        canRetryAsIs: false,
+        recommendedAction: "先修复 schema 兼容或提示约束，再从断点继续。",
+        rawError: message,
+      },
+    };
+  }
+
+  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("network") || lower.includes("fetch failed") || lower.includes("econnreset") || lower.includes("etimedout") || message.includes("Run cancelled.")) {
+    return {
+      category: "recoverable",
+      diagnosis: {
+        title: "临时中断，可从断点恢复",
+        summary: "系统判断这更像接口超时、网络中断或进程被中止。",
+        cause: "外部请求或运行进程中断，不一定表示正文或配置有问题。",
+        impact: "已完成章节与阶段断点已保留，继续时会跳过已完成阶段。",
+        canRetryAsIs: true,
+        recommendedAction: "可以直接从断点继续。",
+        rawError: message,
+      },
+    };
+  }
+
+  return {
+    category: "unknown",
+    diagnosis: {
+      title: "自动续写中断，系统无法可靠分类",
+      summary: "这次错误没有匹配到已知的临时故障、schema 问题或记忆目标问题。",
+      cause: "未知错误。",
+      impact: "已完成章节与阶段断点已保留；但原样继续是否会再次失败尚不确定。",
+      canRetryAsIs: false,
+      recommendedAction: "建议暂停自动续写，先补充诊断或修复原因；不要让用户猜测错误类型。",
+      rawError: message,
+    },
+  };
+}
+
 /** 一批自动续写的持久状态（一次只有一批，新批次覆盖）。 */
 export type AutopilotBatch = {
   batchId: string;
@@ -64,7 +173,15 @@ export type AutopilotBatch = {
   status: "running" | "gated" | "failed" | "completed" | "cancelled";
   /** 已自动续跑次数（跨刷新持久，上限 AUTOPILOT_MAX_AUTO_RETRIES）。 */
   autoRetryCount: number;
-  failure?: { globalIndex: number; kind: AutopilotFailureKind; reason: string };
+  failure?: {
+    globalIndex: number;
+    kind: AutopilotFailureKind;
+    category?: AutopilotFailureCategory;
+    reason: string;
+    diagnosis?: AutopilotFailureDiagnosis;
+    repairPlan?: AutopilotRepairPlan;
+    decision?: AutopilotFailureDecision;
+  };
   /** key = globalIndex。 */
   checkpoints: Record<number, ChapterCheckpoint>;
 };

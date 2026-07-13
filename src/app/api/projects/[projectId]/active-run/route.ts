@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 
-import { findActiveRun } from "@/core/run-progress";
+import { findVisibleRun } from "@/core/run-progress";
+
+export const dynamic = "force-dynamic";
 
 export async function GET(_request: Request, { params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = await params;
-  const active = await findActiveRun(projectId);
-  return NextResponse.json({ runId: active?.runId ?? null, state: active });
+  const visible = await findVisibleRun(projectId);
+  return NextResponse.json({ runId: visible?.runId ?? null, state: visible });
 }
