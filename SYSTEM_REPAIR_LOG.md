@@ -49,3 +49,29 @@ Runtime content repairs and normal writing artifacts do not belong here. This lo
 - The alias map only covers known review-diagnosis drift patterns; future model labels may still need new deterministic aliases.
 - The current mechanism records code-level repair history in a repository file, not yet in the Writeflow UI or run artifacts.
 - There is still no automated test runner configured; validation currently relies on lint/build plus targeted code review.
+
+## 2026-07-21 — Review recovery loop escalation
+
+**Trigger:** After ordinary review and one targeted repair attempt, some chapters still returned `revise` even when the residual issue was a clear auto-fixable continuity conflict. The system fell through to a generic `unknown`/manual retry path instead of continuing a structured recovery loop.
+
+**Classification:** `failure_routing`, `pipeline_logic`, `ui_visibility`, `documentation`.
+
+**Changed files:**
+- `src/core/review-recovery.ts` — adds issue fingerprinting, recovery-budget helpers, and convergence checks.
+- `src/schemas/review-recovery.ts` — adds schemas for review recovery attempts and trace state.
+- `src/core/autopilot-batch.ts` — extends failure categories and persists `recoveryTrace` in batch failure state.
+- `src/app/actions.ts` — refactors `autopilotReviewLoop` to run multi-attempt targeted repair with fresh diagnosis each round, escalation, verification, and explicit `auto_repair_exhausted` / `system_contract_error` routing.
+- `src/components/workspace/generation-process-panel.tsx` — shows the recovery trace and attempt history in the failure UI.
+- `docs/technical-plan.md` — documents the review recovery loop and recovery trace.
+- `docs/product-plan.md` — documents the multi-round auto-repair behavior.
+
+**Behavior change:** Autopilot now treats recoverable review failures as a structured loop rather than a one-shot repair. It recomputes diagnosis each round, fingerprints issues, escalates repair scope when progress stalls, persists the recovery trace, and exposes the trajectory in the UI. Failures that exhaust the recovery budget are now reported as `auto_repair_exhausted` instead of silently degrading to `unknown`.
+
+**Validation:**
+- `npm run lint` — passed after the recovery loop and UI updates.
+- `npm run build` — passed after the recovery loop and UI updates; build emitted the existing Turbopack NFT warning unrelated to the repair.
+
+**Remaining risks:**
+- The recovery fingerprint heuristics are still heuristic-based and may need tuning as new failure patterns appear.
+- Recovery trace visibility is now in the failure panel, but not yet in dedicated artifact views or a historical analytics page.
+- The new state machine still relies on agent diagnoses being reasonably well-formed; additional normalization may be needed for future label drift.

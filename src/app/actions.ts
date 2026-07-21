@@ -24,12 +24,21 @@ import {
   saveChapterCheckpointStage,
   writeBatch,
   type AutopilotBatch,
+  type AutopilotFailureCategory,
   type AutopilotFailureDecision,
   type AutopilotFailureDiagnosis,
   type AutopilotRepairPlan,
   type ChapterCheckpoint,
   type ReviewProgress,
 } from "@/core/autopilot-batch";
+import {
+  AUTOPILOT_MAX_TARGETED_REPAIR_ATTEMPTS,
+  diagnosisAllowsRecovery,
+  diagnosisNeedsAuthor,
+  fingerprintReviewIssues,
+  fingerprintSetKey,
+  hasRecoveryProgress,
+} from "@/core/review-recovery";
 import { createProjectSchema } from "@/schemas/project";
 import type { BeatSheet } from "@/schemas/beat-sheet";
 import type { ChapterPlan, PlannedChapter } from "@/schemas/chapter-plan";
@@ -42,6 +51,7 @@ import { finalChapters } from "@/schemas/final-manuscript";
 import type { FinalChapter, FinalManuscript } from "@/schemas/final-manuscript";
 import type { VariantStrategy, VariantStrategyPlan } from "@/schemas/variant-strategy";
 import type { ReviewFailureDiagnosis, RepairVerification, TargetedRepairPlan, TargetedRepairResult } from "@/schemas/review-repair";
+import type { ReviewRecoveryTrace } from "@/schemas/review-recovery";
 import { memoryPatchSchema } from "@/schemas/memory-patch";
 import type { FinalManuscriptDigest, MemoryPatch } from "@/schemas/memory-patch";
 import type { Blueprint } from "@/schemas/blueprint";
@@ -1678,36 +1688,6 @@ Diagnose whether these unresolved issues are auto-fixable narrative defects, tru
   return runAgent({ agent: agents.reviewFailureDiagnoser, prompt, maxTokens: 2600, label: "诊断审稿失败原因" });
 }
 
-function diagnosisAllowsAutoRepair(diagnosis: ReviewFailureDiagnosis) {
-  return diagnosis.overallAutoFixability === "safe_auto_fix" || diagnosis.overallAutoFixability === "likely_auto_fix";
-}
-
-function diagnosisRequiresAuthor(diagnosis: ReviewFailureDiagnosis) {
-  return diagnosis.overallAutoFixability === "needs_author_choice" || diagnosis.diagnoses.some((item) => item.autoFixability === "needs_author_choice");
-}
-
-function repairPlanToAutopilotRepairPlan(plan: TargetedRepairPlan, diagnosis: ReviewFailureDiagnosis): AutopilotRepairPlan {
-  const levelMap: Record<TargetedRepairPlan["repairLevel"], AutopilotRepairPlan["level"]> = {
-    paragraph: "edit_scene",
-    scene: "draft_scene",
-    multi_scene: "draft_scene",
-    outline: "outline",
-    chapter_strategy: "route",
-    memory: "memory",
-    final_selection: "review_only",
-    author_choice: "unknown",
-    system_attention: "unknown",
-  };
-  return {
-    level: levelMap[plan.repairLevel],
-    confidence: plan.confidence,
-    summary: plan.repairIntent,
-    recommendedAction: plan.repairLevel === "author_choice" ? "ask_author" : plan.repairLevel === "outline" || plan.repairLevel === "chapter_strategy" ? "regenerate_chapter" : "revise_current_draft",
-    rationale: diagnosis.rationale,
-    affectedScenes: plan.affectedSegments,
-  };
-}
-
 async function planTargetedRepair(input: {
   projectName: string;
   manuscriptContext: string;
@@ -1715,6 +1695,7 @@ async function planTargetedRepair(input: {
   editSet: EditSet;
   issues: ReviewIssue[];
   diagnosis: ReviewFailureDiagnosis;
+  recoveryTrace?: ReviewRecoveryTrace;
 }) {
   const prompt = `Project: ${input.projectName}
 
@@ -1733,7 +1714,10 @@ ${formatIssuesForPrompt(input.issues)}
 Structured diagnosis:
 ${JSON.stringify(input.diagnosis, null, 2)}
 
-Create a minimal targeted repair plan. Do not write prose.`;
+Previous recovery attempts, if any:
+${input.recoveryTrace?.attempts.length ? JSON.stringify(input.recoveryTrace.attempts.map((attempt) => ({ attempt: attempt.attempt, outcome: attempt.outcome, repairLevel: attempt.repairPlan?.repairLevel, repairIntent: attempt.repairPlan?.repairIntent, summary: attempt.summary, verification: (attempt.verification ?? []).map((item) => ({ variantId: item.variantId, issueResolved: item.result.issueResolved, confidence: item.result.resolutionConfidence, remainingProblem: item.result.remainingProblem, regressions: item.result.introducedRegressions })), rereview: (attempt.rereview ?? []).map((review) => ({ variantId: review.variantId, verdict: review.verdict, summary: review.summary })) })), null, 2) : "None"}
+
+Create the next minimal targeted repair plan. If previous attempts did not resolve the same issue, escalate the repair scope just enough (paragraph -> scene -> multi_scene) instead of repeating the same patch. Do not write prose.`;
 
   return runAgent({ agent: agents.repairPlanner, prompt, maxTokens: 2200, label: "规划定点修复" });
 }
@@ -2806,9 +2790,10 @@ type ChapterPipelineResult =
       verdict: string;
       issues: ReviewIssue[];
       repairPlan: AutopilotRepairPlan;
-      failureCategory?: "author_decision_required" | "system_fix_required" | "unknown";
+      failureCategory?: AutopilotFailureCategory;
       failureDiagnosis?: AutopilotFailureDiagnosis;
       decision?: AutopilotFailureDecision;
+      recoveryTrace?: ReviewRecoveryTrace;
     }
   | { status: "duplicate"; chapterTitle: string; similarity: number };
 
@@ -2998,14 +2983,20 @@ function buildAuthorChoiceDecision(input: { chapterTitle: string; verdict: strin
   };
 }
 
-function buildSystemAttentionDiagnosis(input: { chapterTitle: string; verdict: string; repairPlan: AutopilotRepairPlan; diagnosis?: ReviewFailureDiagnosis }): AutopilotFailureDiagnosis {
+function buildSystemAttentionDiagnosis(input: { chapterTitle: string; verdict: string; repairPlan: AutopilotRepairPlan; diagnosis?: ReviewFailureDiagnosis; recoveryTrace?: ReviewRecoveryTrace }): AutopilotFailureDiagnosis {
+  const attempts = input.recoveryTrace?.attempts.length ?? 0;
+  const exhausted = input.recoveryTrace?.status === "auto_repair_exhausted";
   return {
-    title: "审稿失败需要系统处理，不是作者创作决策",
-    summary: `《${input.chapterTitle}》自动修订后复审仍为 ${input.verdict}，系统没有把剩余问题可靠转成可执行修复。`,
-    cause: input.diagnosis?.rationale ?? input.repairPlan.summary,
+    title: exhausted ? "自动修复已耗尽，需要系统处理" : "审稿失败需要系统处理，不是作者创作决策",
+    summary: attempts > 0
+      ? `《${input.chapterTitle}》自动修订与 ${attempts} 轮定点修复后复审仍为 ${input.verdict}。`
+      : `《${input.chapterTitle}》自动修订后复审仍为 ${input.verdict}，系统没有把剩余问题可靠转成可执行修复。`,
+    cause: input.recoveryTrace?.finalReason ?? input.diagnosis?.rationale ?? input.repairPlan.summary,
     impact: "已保留此前定稿章节和本章中间产物；未把未通过版本写入终稿。",
     canRetryAsIs: false,
-    recommendedAction: "需要改进诊断/修复链路或由开发者查看现场；不要让作者猜测是否继续修订。",
+    recommendedAction: exhausted
+      ? "自动修复预算已耗尽；建议查看修复轨迹，选择更高层级修复、重新生成本章，或提交系统修复任务。"
+      : "需要改进诊断/修复链路或由开发者查看现场；不要让作者猜测是否继续修订。",
   };
 }
 
@@ -3425,9 +3416,15 @@ async function autopilotReviewLoop(input: {
     }
   }
 
-  let targetedRepairUsed = startRound > AUTOPILOT_MAX_REVISIONS;
-  let lastFailureDiagnosis: ReviewFailureDiagnosis | undefined;
-  let lastTargetedRepairPlan: TargetedRepairPlan | undefined;
+  let recoveryTrace: ReviewRecoveryTrace = {
+    chapterTitle: editSet.sourceDraftTitle,
+    status: "running",
+    maxAttempts: AUTOPILOT_MAX_TARGETED_REPAIR_ATTEMPTS,
+    noProgressCount: 0,
+    attempts: [],
+  };
+  let previousRecoveryIssues: ReviewIssue[] | undefined;
+  let previousFingerprintKey = "";
 
   for (let round = startRound; round <= AUTOPILOT_MAX_REVISIONS + 1; round += 1) {
     const candidates = reviewCandidates(editSet);
@@ -3481,6 +3478,9 @@ async function autopilotReviewLoop(input: {
 
     if (verdict === "pass") {
       const chosen = editSet.variants.find((variant) => variant.id === strongestVariantId) ?? editSet.variants[0];
+      if (recoveryTrace.attempts.length > 0) {
+        recoveryTrace = { ...recoveryTrace, status: "passed", finalReason: `复审结论为 ${verdict}。` };
+      }
       await saveProgress(undefined); // 审稿循环完成，清除进度。
       return { ok: true as const, editSet, editArtifactId, reviews, chosenVariant: chosen };
     }
@@ -3494,7 +3494,7 @@ async function autopilotReviewLoop(input: {
         return { ok: true as const, editSet, editArtifactId, reviews, chosenVariant: chosen };
       }
 
-      const diagnosis = lastFailureDiagnosis ?? await diagnoseReviewFailure({
+      const diagnosis = await diagnoseReviewFailure({
         projectName: input.project.name,
         manuscriptContext: input.manuscriptContext,
         recall: input.recall,
@@ -3502,100 +3502,209 @@ async function autopilotReviewLoop(input: {
         reviews,
         issues: allIssues,
       });
-      lastFailureDiagnosis = diagnosis;
+      const fingerprints = fingerprintReviewIssues(allIssues, diagnosis);
+      const fingerprintKey = fingerprintSetKey(fingerprints);
+      const attemptNumber = recoveryTrace.attempts.length + 1;
 
-      if (!targetedRepairUsed && diagnosisAllowsAutoRepair(diagnosis)) {
-        const targetedPlan = await planTargetedRepair({
+      if (diagnosisNeedsAuthor(diagnosis)) {
+        recoveryTrace = {
+          ...recoveryTrace,
+          status: "author_decision_required",
+          finalAutoFixability: diagnosis.overallAutoFixability,
+          finalReason: diagnosis.rationale,
+          attempts: [
+            ...recoveryTrace.attempts,
+            {
+              attempt: attemptNumber,
+              inputEditArtifactId: editArtifactId,
+              inputIssueFingerprint: fingerprintKey,
+              fingerprints,
+              diagnosis,
+              outcome: "author_decision_required",
+              verification: [],
+              rereview: [],
+              summary: "剩余问题涉及作者创作决策，停止自动修复。",
+            },
+          ],
+        };
+        await saveProgress(undefined);
+        const fallbackPlan = diagnoseReviewRepairPlan(allIssues);
+        return {
+          ok: false as const,
+          verdict,
+          issues: allIssues,
+          repairPlan: fallbackPlan,
+          failureCategory: "author_decision_required" as const,
+          failureDiagnosis: undefined,
+          decision: buildAuthorChoiceDecision({ chapterTitle: editSet.sourceDraftTitle, verdict, issues: allIssues, repairPlan: fallbackPlan, diagnosis }),
+          recoveryTrace,
+        };
+      }
+
+      if (!diagnosisAllowsRecovery(diagnosis)) {
+        recoveryTrace = {
+          ...recoveryTrace,
+          status: diagnosis.overallAutoFixability === "system_fix_required" ? "system_contract_error" : "auto_repair_exhausted",
+          finalAutoFixability: diagnosis.overallAutoFixability,
+          finalReason: diagnosis.rationale,
+          attempts: [
+            ...recoveryTrace.attempts,
+            {
+              attempt: attemptNumber,
+              inputEditArtifactId: editArtifactId,
+              inputIssueFingerprint: fingerprintKey,
+              fingerprints,
+              diagnosis,
+              outcome: diagnosis.overallAutoFixability === "system_fix_required" ? "system_contract_error" : "auto_repair_exhausted",
+              summary: "诊断结果不允许继续自动文本修复。",
+            },
+          ],
+        };
+        await saveProgress(undefined);
+        const fallbackPlan = diagnoseReviewRepairPlan(allIssues);
+        const failureCategory: AutopilotFailureCategory = diagnosis.overallAutoFixability === "system_fix_required" ? "system_fix_required" : "auto_repair_exhausted";
+        return {
+          ok: false as const,
+          verdict,
+          issues: allIssues,
+          repairPlan: fallbackPlan,
+          failureCategory,
+          failureDiagnosis: buildSystemAttentionDiagnosis({ chapterTitle: editSet.sourceDraftTitle, verdict, repairPlan: fallbackPlan, diagnosis, recoveryTrace }),
+          recoveryTrace,
+        };
+      }
+
+      if (attemptNumber > recoveryTrace.maxAttempts || recoveryTrace.noProgressCount >= 2) {
+        recoveryTrace = {
+          ...recoveryTrace,
+          status: "auto_repair_exhausted",
+          finalAutoFixability: diagnosis.overallAutoFixability,
+          finalReason: diagnosis.rationale,
+          attempts: [
+            ...recoveryTrace.attempts,
+            {
+              attempt: attemptNumber,
+              inputEditArtifactId: editArtifactId,
+              inputIssueFingerprint: fingerprintKey,
+              fingerprints,
+              diagnosis,
+              outcome: "auto_repair_exhausted",
+              summary: "可自动修复问题已达到恢复预算或连续无收敛，停止自动修复。",
+            },
+          ],
+        };
+        await saveProgress(undefined);
+        const fallbackPlan = diagnoseReviewRepairPlan(allIssues);
+        return {
+          ok: false as const,
+          verdict,
+          issues: allIssues,
+          repairPlan: fallbackPlan,
+          failureCategory: "auto_repair_exhausted" as const,
+          failureDiagnosis: buildSystemAttentionDiagnosis({ chapterTitle: editSet.sourceDraftTitle, verdict, repairPlan: fallbackPlan, diagnosis, recoveryTrace }),
+          recoveryTrace,
+        };
+      }
+
+      const recoveryInputEditArtifactId = editArtifactId;
+      const targetedPlan = await planTargetedRepair({
+        projectName: input.project.name,
+        manuscriptContext: input.manuscriptContext,
+        recall: input.recall,
+        editSet,
+        issues: allIssues,
+        diagnosis,
+        recoveryTrace,
+      });
+
+      const repairedVariants: EditedVariant[] = [];
+      const verificationResults: Array<{ variantId: string; verification: RepairVerification }> = [];
+      for (const variant of editSet.variants) {
+        const variantIssues = issuesForVariant(allIssues, variant.id);
+        if (variantIssues.length === 0) {
+          repairedVariants.push(variant);
+          continue;
+        }
+        const repairResult = await applyTargetedRepair({
           projectName: input.project.name,
           manuscriptContext: input.manuscriptContext,
           recall: input.recall,
-          editSet,
-          issues: allIssues,
+          variant,
+          issues: variantIssues,
           diagnosis,
+          repairPlan: targetedPlan,
         });
-        lastTargetedRepairPlan = targetedPlan;
-
-        const repairedVariants: EditedVariant[] = [];
-        const verificationResults: Array<{ variantId: string; verification: RepairVerification }> = [];
-        for (const variant of editSet.variants) {
-          const variantIssues = issuesForVariant(allIssues, variant.id);
-          if (variantIssues.length === 0) {
-            repairedVariants.push(variant);
-            continue;
-          }
-          const repairResult = await applyTargetedRepair({
-            projectName: input.project.name,
-            manuscriptContext: input.manuscriptContext,
-            recall: input.recall,
-            variant,
-            issues: variantIssues,
-            diagnosis,
-            repairPlan: targetedPlan,
-          });
-          const verification = await verifyTargetedRepair({
-            projectName: input.project.name,
-            manuscriptContext: input.manuscriptContext,
-            recall: input.recall,
-            variant,
-            originalManuscript: variant.manuscript,
-            issues: variantIssues,
-            diagnosis,
-            repairPlan: targetedPlan,
-            repairResult,
-          });
-          verificationResults.push({ variantId: variant.id, verification });
-          repairedVariants.push({
-            id: variant.id,
-            sourceVariantId: variant.sourceVariantId,
-            title: variant.title.includes("（定点修复版）") ? variant.title : `${variant.title}（定点修复版）`,
-            editStrategy: `定点修复：${targetedPlan.repairIntent}`,
-            strategyPlan: variant.strategyPlan,
-            changesMade: repairResult.changesMade,
-            remainingConcerns: [...repairResult.remainingConcerns, ...verification.introducedRegressions.map((item) => `验证发现回归：${item}`)],
-            manuscript: repairResult.manuscript,
-          });
-        }
-
-        if (verificationResults.every((item) => !verificationFailed(item.verification))) {
-          editSet = {
-            sourceDraftTitle: editSet.sourceDraftTitle,
-            variants: repairedVariants,
-            editorNotes: [`定点修复：${targetedPlan.repairIntent}`],
-          };
-          editArtifactId = await persistJobArtifact({
-            project: input.project,
-            kind: "edit",
-            relativeDir: "finals",
-            fileName: "targeted-repair-drafts",
-            title: `Autopilot targeted repair for ${editSet.sourceDraftTitle}`,
-            content: JSON.stringify({ ...editSet, repairDiagnosis: diagnosis, repairPlan: targetedPlan, repairVerification: verificationResults }, null, 2),
-            agentId: "targeted-repair",
-            stepTitle: "Autopilot targeted repair",
-            summary: `Autopilot applied targeted repair to ${editSet.sourceDraftTitle}.`,
-            parentArtifactId: editParentArtifactId ?? undefined,
-          });
-          targetedRepairUsed = true;
-          await saveProgress({ round: round + 1, editArtifactId });
-          continue;
-        }
+        const verification = await verifyTargetedRepair({
+          projectName: input.project.name,
+          manuscriptContext: input.manuscriptContext,
+          recall: input.recall,
+          variant,
+          originalManuscript: variant.manuscript,
+          issues: variantIssues,
+          diagnosis,
+          repairPlan: targetedPlan,
+          repairResult,
+        });
+        verificationResults.push({ variantId: variant.id, verification });
+        repairedVariants.push({
+          id: variant.id,
+          sourceVariantId: variant.sourceVariantId,
+          title: variant.title.includes("（定点修复版）") ? variant.title : `${variant.title}（定点修复版）`,
+          editStrategy: `定点修复第 ${attemptNumber} 轮：${targetedPlan.repairIntent}`,
+          strategyPlan: variant.strategyPlan,
+          changesMade: repairResult.changesMade,
+          remainingConcerns: [...repairResult.remainingConcerns, ...verification.introducedRegressions.map((item) => `验证发现回归：${item}`)],
+          manuscript: repairResult.manuscript,
+        });
       }
 
-      await saveProgress(undefined);
-      const fallbackPlan = lastTargetedRepairPlan ? repairPlanToAutopilotRepairPlan(lastTargetedRepairPlan, diagnosis) : diagnoseReviewRepairPlan(allIssues);
-      const failureCategory: "author_decision_required" | "system_fix_required" | "unknown" = diagnosisRequiresAuthor(diagnosis)
-        ? "author_decision_required"
-        : diagnosis.overallAutoFixability === "system_fix_required"
-          ? "system_fix_required"
-          : "unknown";
-      return {
-        ok: false as const,
-        verdict,
-        issues: allIssues,
-        repairPlan: fallbackPlan,
-        failureCategory,
-        failureDiagnosis: failureCategory === "system_fix_required" || failureCategory === "unknown" ? buildSystemAttentionDiagnosis({ chapterTitle: editSet.sourceDraftTitle, verdict, repairPlan: fallbackPlan, diagnosis }) : undefined,
-        decision: failureCategory === "author_decision_required" ? buildAuthorChoiceDecision({ chapterTitle: editSet.sourceDraftTitle, verdict, issues: allIssues, repairPlan: fallbackPlan, diagnosis }) : undefined,
+      editSet = {
+        sourceDraftTitle: editSet.sourceDraftTitle,
+        variants: repairedVariants,
+        editorNotes: [`定点修复第 ${attemptNumber} 轮：${targetedPlan.repairIntent}`],
       };
+      editArtifactId = await persistJobArtifact({
+        project: input.project,
+        kind: "edit",
+        relativeDir: "finals",
+        fileName: `targeted-repair-drafts-${attemptNumber}`,
+        title: `Autopilot targeted repair ${attemptNumber} for ${editSet.sourceDraftTitle}`,
+        content: JSON.stringify({ ...editSet, repairDiagnosis: diagnosis, repairPlan: targetedPlan, repairVerification: verificationResults }, null, 2),
+        agentId: "targeted-repair",
+        stepTitle: `Autopilot targeted repair (attempt ${attemptNumber})`,
+        summary: `Autopilot applied targeted repair attempt ${attemptNumber} to ${editSet.sourceDraftTitle}.`,
+        parentArtifactId: editParentArtifactId ?? undefined,
+      });
+
+      const verificationSummary = verificationResults.every((item) => !verificationFailed(item.verification))
+        ? "定点修复验证通过，进入完整复审。"
+        : "定点修复验证未完全通过，仍进入完整复审以确认剩余问题并决定下一轮修复。";
+      recoveryTrace = {
+        ...recoveryTrace,
+        attempts: [
+          ...recoveryTrace.attempts,
+          {
+            attempt: attemptNumber,
+            inputEditArtifactId: recoveryInputEditArtifactId,
+            inputIssueFingerprint: fingerprintKey,
+            fingerprints,
+            diagnosis,
+            repairPlan: targetedPlan,
+            repairedEditArtifactId: editArtifactId,
+            verification: verificationResults.map((item) => ({ variantId: item.variantId, result: item.verification })),
+            outcome: verificationResults.every((item) => !verificationFailed(item.verification)) ? "repair_applied" : "verification_failed",
+            summary: verificationSummary,
+          },
+        ],
+      };
+      if (previousRecoveryIssues) {
+        const progressed = hasRecoveryProgress(previousRecoveryIssues, allIssues, previousFingerprintKey, fingerprintKey);
+        recoveryTrace.noProgressCount = progressed ? 0 : recoveryTrace.noProgressCount + 1;
+      }
+      previousRecoveryIssues = allIssues;
+      previousFingerprintKey = fingerprintKey;
+      await saveProgress({ round: round + 1, editArtifactId });
+      continue;
     }
 
     // 按 issues 修订：逐变体生成修订版，组装新 EditSet。续跑命中本轮时复用已修订变体。
@@ -3967,6 +4076,7 @@ Create a chapter beat sheet for this selected direction. 大纲的每一场都�
       failureCategory: reviewed.failureCategory,
       failureDiagnosis: reviewed.failureDiagnosis,
       decision: reviewed.decision,
+      recoveryTrace: reviewed.recoveryTrace,
     };
   }
 
@@ -4081,11 +4191,12 @@ async function runAutopilotBatch(
           reason: `审稿 ${result.verdict}`,
           diagnosis: result.failureDiagnosis ?? (category === "author_decision_required"
             ? buildQualityDiagnosis({ chapterTitle: result.chapterTitle, verdict: result.verdict, repairPlan: result.repairPlan })
-            : buildSystemAttentionDiagnosis({ chapterTitle: result.chapterTitle, verdict: result.verdict, repairPlan: result.repairPlan })),
+            : buildSystemAttentionDiagnosis({ chapterTitle: result.chapterTitle, verdict: result.verdict, repairPlan: result.repairPlan, recoveryTrace: result.recoveryTrace })),
           repairPlan: result.repairPlan,
           decision: result.decision ?? (category === "author_decision_required"
             ? buildQualityDecision({ chapterTitle: result.chapterTitle, verdict: result.verdict, issues: result.issues, repairPlan: result.repairPlan })
             : undefined),
+          recoveryTrace: result.recoveryTrace,
         };
         await writeBatch(project.id, fresh);
         const blockers = result.issues.filter((issue) => issue.severity !== "minor").slice(0, 8).map((issue) => `- [${issue.severity}] ${issue.problem}`).join("\n");

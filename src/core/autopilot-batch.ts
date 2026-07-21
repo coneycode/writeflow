@@ -6,6 +6,7 @@ import type { PlannedChapter } from "@/schemas/chapter-plan";
 import type { DraftSegment } from "@/schemas/draft";
 import type { EditedSegment, EditedVariant } from "@/schemas/edit";
 import type { VariantReview } from "@/schemas/review";
+import type { ReviewRecoveryTrace } from "@/schemas/review-recovery";
 
 /** 审稿修订循环的断点：记录当前轮次与本轮已完成的逐变体审稿/修订，供续跑复用。 */
 export type ReviewProgress = {
@@ -70,7 +71,7 @@ export type AutopilotRepairPlan = {
   affectedVariants?: string[];
 };
 
-export type AutopilotFailureCategory = "recoverable" | "system_fix_required" | "author_decision_required" | "unknown";
+export type AutopilotFailureCategory = "recoverable" | "system_contract_error" | "auto_repair_exhausted" | "system_fix_required" | "author_decision_required" | "unknown";
 
 export type AutopilotFailureDiagnosis = {
   title: string;
@@ -191,6 +192,7 @@ export type AutopilotBatch = {
     diagnosis?: AutopilotFailureDiagnosis;
     repairPlan?: AutopilotRepairPlan;
     decision?: AutopilotFailureDecision;
+    recoveryTrace?: ReviewRecoveryTrace;
   };
   /** key = globalIndex。 */
   checkpoints: Record<number, ChapterCheckpoint>;
