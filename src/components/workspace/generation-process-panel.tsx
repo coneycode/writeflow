@@ -67,6 +67,23 @@ type FailureDiagnosis = {
   rawError?: string;
 };
 
+type RecoveryTrace = {
+  chapterTitle: string;
+  status: "running" | "passed" | "author_decision_required" | "auto_repair_exhausted" | "system_contract_error";
+  maxAttempts: number;
+  noProgressCount: number;
+  finalReason?: string;
+  attempts: Array<{
+    attempt: number;
+    outcome: string;
+    summary: string;
+    repairPlan?: { repairLevel: string; repairIntent: string; confidence: string };
+    verification?: Array<{ variantId: string; result: { issueResolved: boolean; resolutionConfidence: string; remainingProblem?: string; introducedRegressions: string[] } }>;
+    rereview?: Array<{ variantId: string; verdict: string; summary: string }>;
+    diagnosis?: { summary: string; overallAutoFixability: string; rationale: string };
+  }>;
+};
+
 type ResumableInfo = {
   resumable: boolean;
   /** true = 软闸门（每批停下等审阅），非失败。 */
@@ -81,7 +98,7 @@ type ResumableInfo = {
   completedThrough?: number;
   /** 路线图剩余未定稿章数。 */
   remaining?: number;
-  failure?: { globalIndex: number; kind: string; category?: "recoverable" | "system_fix_required" | "author_decision_required" | "unknown"; reason: string; diagnosis?: FailureDiagnosis; repairPlan?: RepairPlan; decision?: FailureDecision } | null;
+  failure?: { globalIndex: number; kind: string; category?: "recoverable" | "system_contract_error" | "auto_repair_exhausted" | "system_fix_required" | "author_decision_required" | "unknown"; reason: string; diagnosis?: FailureDiagnosis; repairPlan?: RepairPlan; decision?: FailureDecision; recoveryTrace?: RecoveryTrace } | null;
 };
 
 /** 排程延迟兜底（接口未返回时）。 */
@@ -138,17 +155,8 @@ function StepCard({ step, defaultOpen }: { step: RunStep; defaultOpen: boolean }
         <span className="shrink-0 text-[11px] text-stone-500">{elapsedLabel(step.startedAt, step.endedAt)}</span>
       </summary>
 
-      {step.promptPreview ? (
-        <div className="mt-3">
-          <p className="text-[11px] font-medium text-stone-500">发送内容（节选）</p>
-          <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-lg border border-stone-800 bg-stone-900/70 p-2 text-[11px] leading-5 text-stone-400">
-            {step.promptPreview}
-          </pre>
-        </div>
-      ) : null}
-
       <div className="mt-3">
-        <p className="text-[11px] font-medium text-stone-500">模型输出{step.status === "running" ? "（生成中…）" : ""}</p>
+        <p className="text-[11px] font-medium text-stone-500">LLM 输出{step.status === "running" ? "（生成中…）" : ""}</p>
         <pre
           ref={outputRef}
           className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap rounded-lg border border-stone-800 bg-stone-900/70 p-2 text-[11px] leading-5 text-stone-300"
@@ -156,6 +164,15 @@ function StepCard({ step, defaultOpen }: { step: RunStep; defaultOpen: boolean }
           {step.output || (step.status === "running" ? "…" : "（无输出）")}
         </pre>
       </div>
+
+      {step.promptPreview ? (
+        <details className="mt-3 rounded-lg border border-stone-800 bg-stone-900/40 p-2">
+          <summary className="cursor-pointer text-[11px] font-medium text-stone-500">调试详情：LLM 输入（Composer 组装的提示词节选）</summary>
+          <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap rounded-lg border border-stone-800 bg-stone-900/70 p-2 text-[11px] leading-5 text-stone-400">
+            {step.promptPreview}
+          </pre>
+        </details>
+      ) : null}
     </details>
   );
 }
@@ -594,6 +611,35 @@ export function GenerationProcessPanel({ projectId }: { projectId: string }) {
                     <p className="mt-1 text-stone-400">{(resumable.failure.repairPlan ?? resumable.failure.decision?.repairPlan)?.summary}</p>
                     <p className="mt-1 text-stone-400">{(resumable.failure.repairPlan ?? resumable.failure.decision?.repairPlan)?.rationale}</p>
                   </div>
+                ) : null}
+                {resumable.failure.recoveryTrace ? (
+                  <details className="rounded-lg border border-stone-700/70 bg-stone-950/40 p-2">
+                    <summary className="cursor-pointer text-[11px] font-medium text-stone-300">自动修复轨迹 · {resumable.failure.recoveryTrace.status} · {resumable.failure.recoveryTrace.attempts.length} 轮</summary>
+                    <div className="mt-2 space-y-2 text-[11px] leading-5 text-stone-300">
+                      {resumable.failure.recoveryTrace.finalReason ? (
+                        <p className="text-stone-400">最终原因：{resumable.failure.recoveryTrace.finalReason}</p>
+                      ) : null}
+                      {resumable.failure.recoveryTrace.attempts.length > 0 ? (
+                        <div className="space-y-2">
+                          {resumable.failure.recoveryTrace.attempts.map((attempt) => (
+                            <div key={attempt.attempt} className="rounded-md border border-stone-800 bg-stone-900/50 p-2">
+                              <p className="font-medium text-stone-200">第 {attempt.attempt} 轮 · {attempt.outcome}</p>
+                              <p className="mt-1 text-stone-400">{attempt.summary}</p>
+                              {attempt.repairPlan ? (
+                                <p className="mt-1 text-stone-400">修复层级：{attempt.repairPlan.repairLevel} · {attempt.repairPlan.repairIntent}</p>
+                              ) : null}
+                              {attempt.verification?.length ? (
+                                <p className="mt-1 text-stone-400">验证：{attempt.verification.map((item) => `${item.variantId} ${item.result.issueResolved ? "通过" : "未通过"} / ${item.result.resolutionConfidence}`).join("；")}</p>
+                              ) : null}
+                              {attempt.rereview?.length ? (
+                                <p className="mt-1 text-stone-400">复审：{attempt.rereview.map((review) => `${review.variantId} ${review.verdict}`).join("；")}</p>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  </details>
                 ) : null}
                 {resumable.failure.diagnosis.rawError ? (
                   <details className="mt-1 rounded-lg border border-stone-700/70 bg-stone-950/40 p-2">

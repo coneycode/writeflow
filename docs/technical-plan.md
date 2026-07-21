@@ -139,9 +139,11 @@ Artifact 类型：
 - `recall`
 - `direction`
 - `outline`
+- `variant_strategy`（自动续写的动态候选策略规划）
 - `draft`
 - `edit`
 - `review`
+- `final_selection`（自动续写的终稿候选选择理由）
 - `selected_final`
 - `memory_patch`
 - `memory_patch_applied`（"已应用"审计记录，结构不同于 `memory_patch`，独立 kind 避免污染补丁列表）
@@ -212,10 +214,10 @@ Artifact 类型：
 
 - `runAutopilotForProject` 入参：`projectId`、可选 `overallGoal`（本程聚焦目标）、`perChapterBriefs`（可选的开头几章要点）。它不再接收固定 `chapterCount`，而是调用 `roadmapPlannerAgent` 根据创作纲领、续写上文、已有记忆和用户要点自行判断从当前进度到结局需要多少章，落 `chapter_plan` 路线图产物后结束，不立即开写。`AUTOPILOT_ROADMAP_MAX` 只作为离谱章数的安全截断。
 - `runAutopilotFromPlanForProject` 读取最新 `chapter_plan`，组装 `AutopilotBatch` 后进入 `runAutopilotBatch`。
-- `runChapterPipeline` 收拢单章流程：Muse 方向（自动采纳推荐）→ Architect 大纲 → Scribe A/B 变体（`runScribeVariant`）→ Editor 逐场润色（`runEditorSegment`）→ `autopilotReviewLoop` → `appendSelectedFinalChapter` 累计进全文 → `archiveChapterMemory`（只摘要本章、按章标记写入记忆并自动应用）。
-- `autopilotReviewLoop`：逐候选 `runCriticVariant` 聚合 verdict；pass 即返回选中变体，否则 `reviseVariantManuscript` 按 issues 修订重审，最多 `AUTOPILOT_MAX_REVISIONS`（默认 2）轮。修订 prompt 以每条 issue 的 `suggestedFix` 为主指令，允许按问题类型执行删减、弱化、替换或澄清设定；修订 maxTokens 按正文长度动态提高，避免长章只能微调。复审会收到上一轮 `changesMade/remainingConcerns` 作为收敛锚，避免同类主观风格意见反复漂移。轮次耗尽时仅在无 blocker/major、只剩 minor 时放行；残留 blocker/major 返回 `{ ok: false, verdict, issues, repairPlan }`。
-- `diagnoseReviewRepairPlan` 会把残留审稿问题归因到 `route`、`outline`、`draft_scene`、`edit_scene`、`review_only`、`memory` 或 `unknown`，并给出 `rerun_review`、`revise_current_draft`、`regenerate_chapter` 或 `ask_author` 的建议动作。该 repair plan 会写入 `failure.repairPlan` 与 `failure.decision.repairPlan`，供前端展示“阶段定位”和推荐修复路径；当前它先用于诊断和决策文案，真正的局部场景回滚/重修仍是后续增强点。
-- 单章返回 `quality_failed`/`duplicate` 时编排器停止并抛出带报告的错误，run 标记失败、batch 记 `failure.kind`、`failure.category`、结构化诊断和可选决策信息，**前面已成章已落盘保留**。写入 failure 前会读回磁盘最新 batch，避免用入口快照覆盖已落盘 checkpoint。
+- `runChapterPipeline` 收拢单章流程：Muse 方向（自动采纳推荐）→ Architect 大纲 → Variant Strategy Planner 动态规划 1-3 个候选策略（落 `variant_strategy`）→ Scribe 按策略逐场生成候选（`runScribeVariant`）→ Editor 逐场润色（`runEditorSegment`，保留候选策略）→ `autopilotReviewLoop` → Final Variant Selector 根据审稿、章节功能和近期节奏选择终稿（落 `final_selection`）→ `appendSelectedFinalChapter` 累计进全文 → `archiveChapterMemory`（只摘要本章、按章标记写入记忆并自动应用）。
+- `autopilotReviewLoop`：逐候选 `runCriticVariant` 聚合 verdict；pass 即返回选中变体，否则 `reviseVariantManuscript` 按 issues 修订重审，最多 `AUTOPILOT_MAX_REVISIONS`（默认 2）轮。若常规修订后仍失败，系统会进入**多轮 review recovery loop**：每轮重新诊断残留问题、计算 issue fingerprint、生成更窄或更高层级的定点修复计划、执行 `TargetedRepairer`、验证修复并重新复审；恢复预算耗尽时返回 `auto_repair_exhausted`，而不是把可修复问题折叠成 `unknown`。修订 prompt 以每条 issue 的 `suggestedFix` 为主指令，允许按问题类型执行删减、弱化、替换或澄清设定；修订 maxTokens 按正文长度动态提高，避免长章只能微调。复审会收到上一轮 `changesMade/remainingConcerns` 作为收敛锚，避免同类主观风格意见反复漂移；定点修复轨迹会记录 attempt、diagnosis、repairPlan、verification、rereview，供续跑和 UI 回看。
+- `diagnoseReviewRepairPlan` 会把残留审稿问题归因到 `route`、`outline`、`draft_scene`、`edit_scene`、`review_only`、`memory` 或 `unknown`，并给出 `rerun_review`、`revise_current_draft`、`regenerate_chapter` 或 `ask_author` 的建议动作。该 repair plan 会写入 `failure.repairPlan` 与 `failure.decision.repairPlan`，供前端展示“阶段定位”和推荐修复路径；当 recovery loop 认为可自动修复但预算耗尽时，会明确标成 `auto_repair_exhausted` 并保留 recovery trace。
+- 单章返回 `quality_failed`/`duplicate` 时编排器停止并抛出带报告的错误，run 标记失败、batch 记 `failure.kind`、`failure.category`、结构化诊断和可选决策信息，**前面已成章已落盘保留**。写入 failure 前会读回磁盘最新 batch，避免用入口快照覆盖已落盘 checkpoint。失败现场现在还会附带 `recoveryTrace`，用于展示每轮自动修复的结果与剩余问题。
 - 每章前检查 `currentProgress()?.isCancelled` 支持中止；artifact 通过 `parentArtifactId` 维持谱系，产出自然流入章节档案与全文展示。
 - 产物谱系与终稿累计逻辑与手动流程一致（`finalChapters`、`combineManuscriptContextTail`、`latestFinalChapters`）。跨章路线图已带全局编号；防重复以 `manuscriptSimilarity` 与最近若干已成章比对。
 
@@ -226,7 +228,7 @@ Artifact 类型：
 - 字段：`plan`（全局编号章节路线图）、`priorChapterCountAtStart`、`status`（`running`/`gated`/`failed`/`completed`/`cancelled`）、`autoRetryCount`、`failure{globalIndex,kind}`、`checkpoints`（每章各阶段已完成产物 ID）。
 - 跳过已定稿章：`chapter.index <= latestFinalChapters().length` 则略过。
 - 分批软闸门：本次 run 内真正写完 `AUTOPILOT_GATE_INTERVAL`（5）章且路线图仍有剩余时，batch 置 `gated` 并正常 return，run 显示 completed 而非 failed。前端在 completed 后查询 `resumable-autopilot`，展示绿色「继续下一批」提示；20 分钟无操作自动续（依赖页面保持打开）。
-- 阶段复用：`runChapterPipeline` 接收 `checkpoint` 与 `onStage`，每阶段（方向/大纲/草稿/润色）前若已有产物 ID 则 `reloadArtifact` 读回复用，否则跑并回调 `saveChapterCheckpointStage` 记录；读回失败降级重跑该阶段（幂等，`archiveChapterMemory` 按 chapterId strip+rewrite 亦幂等）。
+- 阶段复用：`runChapterPipeline` 接收 `checkpoint` 与 `onStage`，每阶段（方向/大纲/候选策略/草稿/润色）前若已有产物 ID 则 `reloadArtifact` 读回复用，否则跑并回调 `saveChapterCheckpointStage` 记录；读回失败降级重跑该阶段（幂等，`archiveChapterMemory` 按 chapterId strip+rewrite 亦幂等）。
 - 段级复用（更细粒度）：草稿/润色是"变体 × 多场景"的循环，每完成一场即经 `appendChapterSegment` 逐场落盘到 `checkpoint.draftSegments/editSegments`（按变体 id 分组）。续跑时 `runScribeVariant`/润色循环按 `sceneId` 跳过已完成的场，只补未完成的场——失败在变体 B 第 3 场时，变体 A 全部与 B 前 2 场都不重跑。整阶段落盘后 `clearChapterSegments` 清掉段级中间态（artifactId 已足够整段复用）。草稿 segment 的 `notes` 是辅助字段，schema 默认空数组，避免模型漏掉非正文关键字段时中断整批。
 - 审稿修订循环复用：`autopilotReviewLoop` 接收 `reviewCheckpoint`/`onReviewProgress`，把 `checkpoint.reviewProgress{round, editArtifactId, variantReviews, revisedVariants}` 逐变体落盘。续跑时从记录的轮次接着走、读回当轮 EditSet，已审/已修订的变体直接复用，不重审重修；pass 或达轮上限时清除 `reviewProgress`。
 - 定稿→归档缺口修复：定稿 `appendSelectedFinalChapter` 后立即记 `finalizedChapterId` + `archivedMemory:false`，`archiveChapterMemory` 完成后置 `archivedMemory:true`。续跑遇到“已定稿但 `archivedMemory!==true`”的章会**补跑归档**（幂等），杜绝进程死在定稿与归档之间导致该章记忆永久缺失；遇到已定稿章也会归一化 checkpoint 为 `status: completed`，避免“实际完成但状态 pending”误导 UI 与排查。
@@ -251,11 +253,22 @@ Agent 定义位于 registry。每个 Agent 包含：
 1. Server action 基于项目元数据、已选 artifact、上文上下文和 recall memory 构造 prompt。
 2. `runAgent` 把 prompt 发送给 `OpenAICompatibleProvider`。
 3. Provider 通过 OpenAI SDK 调用 chat completions。
-4. 原始文本被归一化为 JSON object。
-5. Agent 对应的 Zod schema 校验解析后的 JSON。
-6. 结果被写入 JSON artifact。
-7. 元数据写入 SQLite。
-8. 相关 Next.js path 被 revalidate。
+4. 原始文本被抽取为 JSON object；若没有 JSON 或 JSON 语法错误，进入一次严格 JSON 修复重试。
+5. 对配置了 `normalizeOutput` 的 Agent，先执行确定性的运行时归一化，再交给 Zod schema 校验。归一化只处理低风险契约问题，例如 enum 同义词、`null` optional 字段、缺省 scope；不得替模型做叙事选择。
+6. Agent 对应的 Zod schema 校验归一化后的 JSON。
+7. 结果被写入 JSON artifact。
+8. 元数据写入 SQLite。
+9. 相关 Next.js path 被 revalidate。
+
+### 故障仲裁与自修复边界
+
+Autopilot 的失败处理分三层，避免“模型自己无限改自己”：
+
+1. **运行时格式修复**：处理非 JSON、Markdown 包裹、语法错误等纯格式问题；由 `runAgent` 限定为一次低温修复重试。
+2. **运行时结构归一化**：处理合法 JSON 但不符合契约的机械问题，例如模型把 `chapter`、`style`、`procedural_continuity_conflict` 这类自然语言分类写进枚举字段。归一化必须是确定性映射，并在 schema 校验前执行。
+3. **内容/系统故障仲裁**：审稿失败先由 ReviewFailureDiagnoser 判断是可自动修的叙事缺陷、需要作者选择、系统缺陷还是未知；只有可验证、低风险的内容问题进入定点修复。schema 设计、prompt contract、失败分类器或 pipeline 缺陷属于系统能力缺口，应通过受控代码修改服务/人工开发流程修项目代码，而不是在创作链路里动态改代码。
+
+代码级修复服务的职责边界是：接收明确的系统修复请求，生成最小 patch，经过 diff 审查、类型检查/构建/测试验证后应用。创作 Autopilot 本身不直接拥有修改项目代码的权限，只能暴露结构化诊断和建议。
 
 ## 长文本与超时控制
 
@@ -294,7 +307,7 @@ Scribe draft 使用场景对齐的分段结构：
 
 Editor 输出仍保存为每个变体的完整 `manuscript`，但内部由场景级润色结果合并而来。审稿修订（`reviseFromReviewForProject`）同样产出 `edit` artifact，每个被修订变体存完整修订后 `manuscript`。
 
-终稿（`selected_final`）按章节累计：除兼容字段外含 `chapters[]`（每章 id、来源、标题、正文、选择备注、`summary` 章节概要），`manuscript` 为各章拼接的完整全文。续写时以「原始上文 + 已选章节全文」作为承接上下文。手动编辑 / 圈选重写 / 删除章都走"读最新终稿 → 改 `chapters[]` → 重算全文 → 写新 `selected_final`"，下游（全文、续写上文、章节档案）从最新终稿派生，自动收敛。
+终稿（`selected_final`）按章节累计：除兼容字段外含 `chapters[]`（每章 id、来源、标题、正文、选择备注、`summary` 章节概要，以及自动续写章节的 `selectionRationale`），`manuscript` 为各章拼接的完整全文。自动续写终稿前会先落 `final_selection`，并把选择理由内嵌到对应章节，供后续章节的近期节奏判断和章节档案展示。续写时以「原始上文 + 已选章节全文」作为承接上下文。手动编辑 / 圈选重写 / 删除章都走"读最新终稿 → 改 `chapters[]` → 重算全文 → 写新 `selected_final`"，下游（全文、续写上文、章节档案）从最新终稿派生，自动收敛。
 
 ## Recall 架构
 

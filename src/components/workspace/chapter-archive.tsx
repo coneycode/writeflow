@@ -87,6 +87,31 @@ export function ChapterArchiveView({ chapters }: { chapters: ChapterArchive[] })
               )}
             </SubCard>
 
+            <SubCard title="候选策略">
+              {chapter.variantStrategy ? (
+                <div className="space-y-3 text-sm leading-6 text-doc-text">
+                  <div>
+                    <p className="font-medium text-doc-text">章节功能：{chapter.variantStrategy.chapterFunction} · 风险：{chapter.variantStrategy.riskLevel}</p>
+                    <p className="mt-1">{chapter.variantStrategy.rationale}</p>
+                    <p className="mt-1 text-xs text-doc-muted">节奏考虑：{chapter.variantStrategy.rhythmConsideration}</p>
+                  </div>
+                  <div className="space-y-2">
+                    {chapter.variantStrategy.strategies.map((strategy) => (
+                      <div key={strategy.id} className="rounded-lg bg-stone-50 p-3">
+                        <p className="text-xs text-doc-accent">候选 {strategy.id}</p>
+                        <p className="mt-1 font-medium text-doc-text">{strategy.title}</p>
+                        <p className="mt-1">{strategy.goal}</p>
+                        <p className="mt-1 text-xs text-doc-muted">适用：{strategy.bestFor}</p>
+                        <p className="mt-1 text-xs text-doc-muted">风险：{strategy.risk}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <Empty>该章无候选策略记录（旧版章节可能缺失）。</Empty>
+              )}
+            </SubCard>
+
             <SubCard title="分段草稿">
               {chapter.draft ? (
                 <div className="space-y-3">
@@ -157,6 +182,36 @@ export function ChapterArchiveView({ chapters }: { chapters: ChapterArchive[] })
                 </div>
               ) : (
                 <Empty>该章无审稿记录。</Empty>
+              )}
+            </SubCard>
+
+            <SubCard title="终稿选择">
+              {chapter.finalSelection ? (
+                <div className="space-y-3 text-sm leading-6 text-doc-text">
+                  <div>
+                    <p className="font-medium text-doc-text">选择：{chapter.finalSelection.selectedVariantTitle}</p>
+                    <p className="mt-1">{chapter.finalSelection.selectionReason}</p>
+                    <p className="mt-1 text-xs text-doc-muted">节奏说明：{chapter.finalSelection.rhythmNote}</p>
+                  </div>
+                  {chapter.finalSelection.rejectedReasons.length > 0 ? (
+                    <div className="space-y-1.5">
+                      {chapter.finalSelection.rejectedReasons.map((item) => (
+                        <p key={item.variantId} className="text-xs text-doc-muted">
+                          未选 {item.variantId}：{item.reason}
+                        </p>
+                      ))}
+                    </div>
+                  ) : null}
+                  {chapter.finalSelection.qualityRisks.length > 0 ? (
+                    <div className="space-y-1.5">
+                      {chapter.finalSelection.qualityRisks.map((risk, index) => (
+                        <p key={index} className="text-xs text-amber-700">风险：{risk}</p>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <Empty>该章无终稿选择理由（旧版章节可能缺失）。</Empty>
               )}
             </SubCard>
 

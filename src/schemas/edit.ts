@@ -1,10 +1,13 @@
 import { z } from "zod";
 
+import { variantStrategySchema } from "./variant-strategy";
+
 export const editedVariantSchema = z.object({
   id: z.string(),
   sourceVariantId: z.string(),
   title: z.string(),
   editStrategy: z.string(),
+  strategyPlan: variantStrategySchema.optional(),
   changesMade: z.array(z.string()),
   remainingConcerns: z.array(z.string()),
   manuscript: z.string(),

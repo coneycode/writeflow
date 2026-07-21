@@ -6,6 +6,7 @@ import type { PlannedChapter } from "@/schemas/chapter-plan";
 import type { DraftSegment } from "@/schemas/draft";
 import type { EditedSegment, EditedVariant } from "@/schemas/edit";
 import type { VariantReview } from "@/schemas/review";
+import type { ReviewRecoveryTrace } from "@/schemas/review-recovery";
 
 /** 审稿修订循环的断点：记录当前轮次与本轮已完成的逐变体审稿/修订，供续跑复用。 */
 export type ReviewProgress = {
@@ -33,6 +34,7 @@ export type ChapterCheckpoint = {
   globalIndex: number;
   directionArtifactId?: string;
   outlineArtifactId?: string;
+  variantStrategyArtifactId?: string;
   draftArtifactId?: string;
   editArtifactId?: string;
   /**
@@ -69,7 +71,7 @@ export type AutopilotRepairPlan = {
   affectedVariants?: string[];
 };
 
-export type AutopilotFailureCategory = "recoverable" | "system_fix_required" | "author_decision_required" | "unknown";
+export type AutopilotFailureCategory = "recoverable" | "system_contract_error" | "auto_repair_exhausted" | "system_fix_required" | "author_decision_required" | "unknown";
 
 export type AutopilotFailureDiagnosis = {
   title: string;
@@ -118,16 +120,25 @@ export function classifyAutopilotFailureMessage(message: string): { category: Au
     };
   }
 
-  if (message.includes("Invalid input") || lower.includes("expected") || lower.includes("zod")) {
+  if (
+    message.includes("Invalid input") ||
+    lower.includes("expected") ||
+    lower.includes("zod") ||
+    lower.includes("did not contain a json object") ||
+    lower.includes("does not contain a json object") ||
+    lower.includes("no json object") ||
+    lower.includes("invalid json") ||
+    lower.includes("json parse")
+  ) {
     return {
       category: "system_fix_required",
       diagnosis: {
-        title: "模型输出格式与系统 schema 不匹配",
-        summary: "某个智能体返回的数据没有通过结构校验。",
-        cause: "模型输出缺字段或字段类型不符合当前 schema。",
-        impact: "已完成阶段会保留；如果 schema/prompt 没有兼容修复，原样继续可能再次失败。",
+        title: "模型输出格式与系统要求不匹配",
+        summary: "某个智能体没有返回系统要求的 JSON 对象，或返回的数据没有通过结构校验。",
+        cause: "模型输出不是可解析的 JSON，或缺字段、字段类型不符合当前 schema。",
+        impact: "已完成阶段会保留；如果输出约束、解析容错或 schema 兼容没有修复，原样继续可能再次失败。",
         canRetryAsIs: false,
-        recommendedAction: "先修复 schema 兼容或提示约束，再从断点继续。",
+        recommendedAction: "先修复该智能体的输出约束、JSON 解析容错或 schema 兼容，再从断点继续。",
         rawError: message,
       },
     };
@@ -181,6 +192,7 @@ export type AutopilotBatch = {
     diagnosis?: AutopilotFailureDiagnosis;
     repairPlan?: AutopilotRepairPlan;
     decision?: AutopilotFailureDecision;
+    recoveryTrace?: ReviewRecoveryTrace;
   };
   /** key = globalIndex。 */
   checkpoints: Record<number, ChapterCheckpoint>;

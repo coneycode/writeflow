@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { variantStrategySchema } from "./variant-strategy";
+
 export const draftSegmentSchema = z.object({
   sceneId: z.string(),
   sceneTitle: z.string(),
@@ -11,6 +13,7 @@ export const draftVariantSchema = z.object({
   id: z.string(),
   title: z.string(),
   strategy: z.string(),
+  strategyPlan: variantStrategySchema.optional(),
   strengths: z.array(z.string()),
   risks: z.array(z.string()),
   segments: z.array(draftSegmentSchema).min(1),
