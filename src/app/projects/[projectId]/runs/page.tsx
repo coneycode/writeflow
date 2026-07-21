@@ -27,9 +27,11 @@ const artifactKindLabels: Record<string, string> = {
   recall: "记忆召回",
   direction: "方向",
   outline: "大纲",
+  variant_strategy: "候选策略",
   draft: "草稿",
   edit: "润色稿",
   review: "审稿",
+  final_selection: "终稿选择",
   selected_final: "已选终稿",
   memory_patch: "记忆补丁",
 };

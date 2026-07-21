@@ -10,6 +10,7 @@ import {
   listOutlineArtifacts,
   listReviewArtifacts,
   listSelectedFinalArtifacts,
+  listVariantStrategyArtifacts,
   readProjectManuscriptContext,
   reviseFromReviewForProject,
   runAutopilotForProject,
@@ -25,6 +26,7 @@ import { ManuscriptContextPanel } from "@/components/workspace/manuscript-contex
 import { MemoryPatchPanel } from "@/components/workspace/memory-patch-panel";
 import { MusePanel } from "@/components/workspace/muse-panel";
 import { ScribePanel } from "@/components/workspace/scribe-panel";
+import { VariantStrategyPanel } from "@/components/workspace/variant-strategy-panel";
 import { WorkspaceLayout, type StageSlot } from "@/components/workspace/workspace-layout";
 import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 import { deriveStages, type StageKey } from "@/components/workspace/workspace-stage";
@@ -40,6 +42,7 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
 
   const directionArtifacts = await listDirectionArtifacts(project.id);
   const outlineArtifacts = await listOutlineArtifacts(project.id);
+  const variantStrategyArtifacts = await listVariantStrategyArtifacts(project.id);
   const draftArtifacts = await listDraftArtifacts(project.id);
   const finalArtifacts = await listFinalArtifacts(project.id);
   const reviewArtifacts = await listReviewArtifacts(project.id);
@@ -52,6 +55,7 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
   const done: Record<StageKey, boolean> = {
     muse: directionArtifacts.length > 0,
     architect: outlineArtifacts.length > 0,
+    strategy: variantStrategyArtifacts.length > 0,
     scribe: draftArtifacts.length > 0,
     editor: finalArtifacts.length > 0,
     critic: reviewArtifacts.length > 0,
@@ -82,9 +86,15 @@ export default async function ProjectWorkspace({ params }: { params: Promise<{ p
       content: <ArchitectPanel outlineArtifacts={outlineArtifacts} projectId={project.id} />,
     },
     {
+      key: "strategy",
+      title: "候选策略",
+      subtitle: "根据章节功能、路线位置与近期节奏规划 1-3 个正文候选策略。",
+      content: <VariantStrategyPanel strategyArtifacts={variantStrategyArtifacts} />,
+    },
+    {
       key: "scribe",
       title: "分段写作",
-      subtitle: "按大纲逐场景生成正文草稿变体。",
+      subtitle: "按候选策略与大纲逐场景生成正文草稿变体。",
       content: <ScribePanel draftArtifacts={draftArtifacts} projectId={project.id} />,
     },
     {

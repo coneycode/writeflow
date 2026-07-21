@@ -1,6 +1,7 @@
 export type StageKey =
   | "muse"
   | "architect"
+  | "strategy"
   | "scribe"
   | "editor"
   | "critic"
@@ -31,7 +32,8 @@ export type StageMeta = {
 export const STAGE_ORDER: StageMeta[] = [
   { key: "muse", name: "构思方向", todo: "运行构思师，生成候选续写方向。", done: "已生成续写方向，待选择。" },
   { key: "architect", name: "章节大纲", todo: "选择方向后生成章节节拍表。", done: "已生成章节大纲，可阅读或编辑。" },
-  { key: "scribe", name: "分段写作", todo: "按大纲逐场景生成正文草稿。", done: "已生成分段草稿，可调整。" },
+  { key: "strategy", name: "候选策略", todo: "根据本章功能与近期节奏规划正文候选策略。", done: "已规划候选策略，可查看每个版本的用途。" },
+  { key: "scribe", name: "分段写作", todo: "按候选策略与大纲逐场景生成正文草稿。", done: "已生成分段草稿，可调整。" },
   { key: "editor", name: "编辑润色", todo: "对草稿运行编辑润色。", done: "已生成润色稿。" },
   { key: "critic", name: "审稿", todo: "对草稿或润色稿运行审稿。", done: "已生成审稿记录。" },
   { key: "final", name: "终稿选择", todo: "从润色变体中选定终稿章节。", done: "已选定终稿章节。" },

@@ -1,5 +1,13 @@
 import { z } from "zod";
 
+import { finalVariantSelectionSchema } from "./final-selection";
+import { variantStrategyPlanSchema } from "./variant-strategy";
+
+export const finalSelectionRationaleSchema = z.object({
+  strategyPlan: variantStrategyPlanSchema.optional(),
+  finalSelection: finalVariantSelectionSchema,
+});
+
 export const finalChapterSchema = z.object({
   id: z.string(),
   sourceArtifactId: z.string(),
@@ -10,6 +18,7 @@ export const finalChapterSchema = z.object({
   createdAt: z.string(),
   /** 本章情节概要：定稿时生成一次并存下，供后续续写/拆章规划复用，避免每次重算。 */
   summary: z.string().optional(),
+  selectionRationale: finalSelectionRationaleSchema.optional(),
 });
 
 /** 章节摘要 agent 的输出。 */
@@ -27,6 +36,7 @@ export const finalManuscriptSchema = z.object({
   chapters: z.array(finalChapterSchema).min(1),
 });
 
+export type FinalSelectionRationale = z.infer<typeof finalSelectionRationaleSchema>;
 export type FinalChapter = z.infer<typeof finalChapterSchema>;
 export type FinalManuscript = z.infer<typeof finalManuscriptSchema>;
 

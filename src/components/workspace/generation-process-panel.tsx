@@ -138,17 +138,8 @@ function StepCard({ step, defaultOpen }: { step: RunStep; defaultOpen: boolean }
         <span className="shrink-0 text-[11px] text-stone-500">{elapsedLabel(step.startedAt, step.endedAt)}</span>
       </summary>
 
-      {step.promptPreview ? (
-        <div className="mt-3">
-          <p className="text-[11px] font-medium text-stone-500">发送内容（节选）</p>
-          <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-lg border border-stone-800 bg-stone-900/70 p-2 text-[11px] leading-5 text-stone-400">
-            {step.promptPreview}
-          </pre>
-        </div>
-      ) : null}
-
       <div className="mt-3">
-        <p className="text-[11px] font-medium text-stone-500">模型输出{step.status === "running" ? "（生成中…）" : ""}</p>
+        <p className="text-[11px] font-medium text-stone-500">LLM 输出{step.status === "running" ? "（生成中…）" : ""}</p>
         <pre
           ref={outputRef}
           className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap rounded-lg border border-stone-800 bg-stone-900/70 p-2 text-[11px] leading-5 text-stone-300"
@@ -156,6 +147,15 @@ function StepCard({ step, defaultOpen }: { step: RunStep; defaultOpen: boolean }
           {step.output || (step.status === "running" ? "…" : "（无输出）")}
         </pre>
       </div>
+
+      {step.promptPreview ? (
+        <details className="mt-3 rounded-lg border border-stone-800 bg-stone-900/40 p-2">
+          <summary className="cursor-pointer text-[11px] font-medium text-stone-500">调试详情：LLM 输入（Composer 组装的提示词节选）</summary>
+          <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap rounded-lg border border-stone-800 bg-stone-900/70 p-2 text-[11px] leading-5 text-stone-400">
+            {step.promptPreview}
+          </pre>
+        </details>
+      ) : null}
     </details>
   );
 }
